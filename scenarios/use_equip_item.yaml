@@ -1,0 +1,24 @@
+name: use_equip_item
+description: Kılıç ve zırh giy, hasar alıp iksir kullan; ekipman ve HP değişimini doğrula.
+tags: [inventory, equip, item]
+account: AI_QA_001
+setup:
+  - give_item: {vnum: 10, count: 1}
+  - give_item: {vnum: 11200, count: 1}
+  - give_item: {vnum: 27001, count: 3}
+  - set_hp: 100
+steps:
+  - equip_item: {vnum: 10}
+    expect:
+      - equipped: {vnum: 10, wear: weapon}
+      - inventory_not_contains: 10
+  - equip_item: {vnum: 11200}
+    expect:
+      - equipped: {vnum: 11200, wear: body}
+  - use_item: {vnum: 27001}
+    expect:
+      - hp: {delta: 50}
+      - item_count: {vnum: 27001, delta: -1}
+assert:
+  - hp: {equals: 150}
+  - server_event: {name: EQUIP, count: 2}

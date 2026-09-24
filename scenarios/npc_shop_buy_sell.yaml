@@ -1,0 +1,24 @@
+name: npc_shop_buy_sell
+description: Genel Mağaza (9001) üzerinden iksir al/sat; yang ve envanter değişimini doğrula.
+tags: [npc, shop, gold]
+account: AI_QA_001
+setup:
+  - set_gold: 1000
+steps:
+  - talk_npc: {vnum: 9001}
+    expect:
+      - window_open: shop
+  - buy_item: {vnum: 27001, count: 3}
+    expect:
+      - item_count: {vnum: 27001, equals: 3}
+      - gold: {delta: -150}
+  - sell_item: {vnum: 27001, count: 1}
+    expect:
+      - item_count: {vnum: 27001, equals: 2}
+      - gold: {delta: -140}
+  - close_window: shop
+assert:
+  - window_closed: shop
+  - gold: {equals: 860}
+  - server_event: {name: SHOP_BUY, count: 3}
+  - server_event: {name: SHOP_SELL, count: 1}

@@ -1,0 +1,25 @@
+name: quest_dog_hunt
+description: >
+  Köy Muhafızı (20016) görevi — "Battle Pass" tipi ilerleme testi. Görevi al, 5 Yaban Köpeği kes,
+  ilerlemenin 5/5 olduğunu doğrula, ödülü al (5x iksir + 500 yang).
+tags: [quest, npc, dialog, combat]
+account: AI_QA_001
+setup:
+  - set_level: 12
+steps:
+  - talk_npc: {vnum: 20016}
+    expect:
+      - window_open: dialog
+  - select_dialog: {text: Kabul}
+    expect:
+      - quest: {name: dog_hunt, state: active, progress: 0}
+  - kill_monster: {vnum: 101, count: 5}
+    expect:
+      - quest: {name: dog_hunt, progress: 5}
+  - talk_npc: {vnum: 20016}
+  - select_dialog: {text: Ödül}
+assert:
+  - quest: {name: dog_hunt, state: done}
+  - item_count: {vnum: 27001, min: 5}
+  - gold: {delta: 500}
+  - system_message: Ödül alındı

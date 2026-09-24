@@ -1,0 +1,16 @@
+name: shop_insufficient_gold
+description: Edge-case — yang yetersizken satın alma reddedilmeli, yang eksiye düşmemeli, item verilmemeli.
+tags: [npc, shop, gold, edge-case]
+account: AI_QA_001
+setup:
+  - set_gold: 30
+steps:
+  - talk_npc: {vnum: 9001}
+  - buy_item: {vnum: 27001}
+    expect_error: NOT_ENOUGH_GOLD
+    expect:
+      - gold: {equals: 30}
+      - inventory_not_contains: 27001
+assert:
+  - system_message: Yeterli Yang yok
+  - server_event: {name: SHOP_BUY, count: 0}

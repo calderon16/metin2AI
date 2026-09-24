@@ -1,0 +1,53 @@
+# Metin2 AI QA yapılandırması
+# Yerel değişiklikler için bu dosyayı qa.local.toml olarak kopyalayın (git'e girmez).
+
+# dev | qa | staging  — "production" değerinde sistem çalışmayı reddeder
+env = "qa"
+
+scenarios_dir = "scenarios"
+artifacts_dir = "artifacts"
+db_path = "artifacts/qa.sqlite"
+# Rapordaki commit/branch bilgisinin okunacağı Metin2 kaynak reposu
+source_repo = "."
+
+[bridge]
+# "sim": in-process simülatör (kaynak kodu olmadan uçtan uca çalışır)
+# "tcp": Metin2_QA.exe'nin QA bridge'i (veya `metin2-qa sim-server`)
+mode = "sim"
+host = "127.0.0.1"
+port = 47800
+timeout_s = 15.0
+
+[accounts]
+allowed_prefix = "AI_QA_"
+default_account = "AI_QA_001"
+# Gerçek ortamda şifreyi burada tutmayın: QA_ACCOUNT_PASSWORD ortam değişkeni önceliklidir
+password = "qa"
+
+[sim]
+# Oracle'ı doğrulamak için bilinçli hata enjeksiyonu (bkz. `metin2-qa reference` -> sim_faults)
+faults = []
+
+[build]
+cwd = "."
+timeout_s = 3600
+# Hedef adı -> komut (argv listesi, shell yok). Örnek:
+# [build.commands]
+# server = ["gmake", "-C", "/usr/metin2/src/server/game/src", "-j8"]
+# db     = ["gmake", "-C", "/usr/metin2/src/server/db/src", "-j8"]
+# client = ["msbuild", "C:/m2/client/Metin2Client.sln", "/p:Configuration=QA"]
+
+[build.commands]
+
+[server]
+# start = ["sh", "/usr/metin2/qa/start.sh"]
+# stop  = ["sh", "/usr/metin2/qa/stop.sh"]
+start = []
+stop = []
+# integration/server/qa_event.cpp çıktısı (tcp modunda). Boşsa sunucu olayları bridge'den okunur.
+# events_file = "/usr/metin2/qa/channel1/core1/qa_events.jsonl"
+error_patterns = ["SYSERR", "Traceback", "QUEST_ERROR", "SQL error"]
+
+[server.log_files]
+# syserr = "/usr/metin2/qa/channel1/core1/syserr"
+# syslog = "/usr/metin2/qa/channel1/core1/syslog"

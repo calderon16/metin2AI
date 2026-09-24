@@ -1,0 +1,14 @@
+name: smoke_login_walk
+description: Login → karakter seçimi → haritada yürüme → ekran görüntüsü. En temel duman testi.
+tags: [smoke, movement]
+account: AI_QA_001
+steps:
+  - walk_to: {x: 6000, y: 6000}
+    expect:
+      - position_near: {x: 6000, y: 6000, tolerance: 200}
+  - screenshot: after_walk
+  - walk_to: {x: 5000, y: 5000}
+assert:
+  - alive
+  - position_near: {x: 5000, y: 5000, tolerance: 200}
+  - player: {field: map, equals: 1}

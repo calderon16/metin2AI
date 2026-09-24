@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "metin2-qa": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "qa.mcp_server"],
+      "env": { "QA_CONFIG": "qa.toml" }
+    }
+  }
+}
