@@ -102,9 +102,9 @@ class LogFileSource:
 class ServerSignals:
     """Bir run boyunca sunucu sinyallerini toplar."""
 
-    def __init__(self, sources: list[EventSource], character: str | None = None):
+    def __init__(self, sources: list[EventSource], characters: set[str] | None = None):
         self.sources = sources
-        self.character = character
+        self.characters = characters
         self.events: list[dict[str, Any]] = []
 
     def mark(self) -> None:
@@ -116,7 +116,7 @@ class ServerSignals:
         for s in self.sources:
             for ev in s.poll():
                 # Başka karakterlere ait olayları ayıkla (oyuncusuz olaylar — ör. SYSERR — kalır)
-                if self.character and ev.get("player") not in (None, self.character):
+                if self.characters and ev.get("player") is not None and ev["player"] not in self.characters:
                     continue
                 new.append(ev)
         self.events.extend(new)

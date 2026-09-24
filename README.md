@@ -75,6 +75,10 @@ QA_CONFIG=qa.toml .venv/bin/metin2-qa run quest_dog_hunt   # PASSED
 | `potion_no_heal` | `use_equip_item` (HP farkı) |
 | `syserr_on_equip` | `use_equip_item` (örtük server_errors) |
 | `negative_gold_on_buy` | `shop_insufficient_gold` (expect_error + QA_ASSERT) |
+| `trade_item_dupe` | `trade_item_for_gold` (conservation: item kopyalandı) |
+| `trade_gold_dupe` | `trade_item_for_gold` (conservation: yang kopyalandı) |
+| `trade_accept_not_reset` | `trade_change_after_accept` (onay sıfırlanmadı → dolandırıcılık) |
+| `party_exp_dupe` | `party_exp_share` (exp paylaşımı) |
 
 ## Claude ile kullanım (MCP)
 
@@ -87,6 +91,7 @@ Claude Desktop için aynı komutu (`.venv/bin/python -m qa.mcp_server`, `QA_CONF
 | `qa_reference` | behaviour / assertion / setup listesi (senaryo yazmak için) |
 | `list_scenarios`, `get_scenario`, `write_scenario` | senaryo yönetimi (şema doğrulamalı) |
 | `run_scenario`, `run_suite` | test çalıştır, yapılandırılmış rapor al |
+| `run_affected` | sadece değişen dosyaların etkilediği senaryolar (seçilme nedenleriyle) |
 | `get_test_runs`, `get_test_result`, `get_failed_tests` | sonuçlar |
 | `get_trace`, `get_server_logs`, `get_client_logs`, `get_screenshot` | kanıt |
 | `replay_failure` | aynı seed ile tekrar → `REPRODUCED k/N` |
@@ -104,6 +109,69 @@ Claude: build → run_scenario("quest_dog_hunt") → FAILED → get_test_result 
 
 Güvenlik: serbest shell ya da SQL tool'u yoktur; build/sunucu komutları yalnızca `qa.toml`'dan,
 hesap işlemleri yalnızca `AI_QA_*` hesaplarına; `env = "production"` iken sistem çalışmaz.
+
+## Değişikliğe göre test seçimi
+
+Claude `shop.cpp`'yi değiştirdiyse bütün suite yerine yalnızca dükkan senaryoları koşar:
+
+```bash
+metin2-qa affected game/src/shop.cpp            # sadece seçimi göster
+metin2-qa affected --base origin/main --run     # git diff'e göre seç ve çalıştır
+#   + npc_shop_buy_sell: game/src/shop.cpp ~ covers 'shop.cpp'; ... ~ kural 'shop*.cpp' → shop
+#   + smoke_login_walk: always → smoke
+```
+
+Seçim üç kaynaktan gelir: senaryonun `covers:` alanı (test ettiği dosyalar), `qa.toml`
+`[selection.rules]` (klasik Metin2 dosya adları için varsayılanlar hazır: `exchange*.cpp → trade`,
+`questlua*.cpp → quest` ...) ve eşleşmeyen dosyalar için `fallback`. `always` her seçime eklenir.
+
+## CI (GitHub Actions)
+
+`.github/workflows/qa.yml` her push/PR'da çalışır:
+
+- **pytest** (Python 3.11 ve 3.12)
+- **tüm senaryolar** iki sabit seed ile, sonuç tablosu iş özetinde, kanıtlar artifact olarak
+- **PR'larda** yalnızca değişikliğin etkilediği senaryolar (`affected --base origin/<hedef>`)
+- **her gece** rastgele seed ile tüm senaryolar (seed'e bağlı gizli hatalar için; başarısız run'ın
+  seed'i raporda olduğundan `replay` ile birebir tekrarlanır)
+
+## Çoklu ajan (trade, party)
+
+Birden fazla gerçek QA karakteri aynı senaryoda. Adımlar sırayla, ilgili ajanın istemcisinden yürür;
+assert'ler ajan bazında ya da tüm ajanlar üzerinden değerlendirilir.
+
+```yaml
+name: trade_item_for_gold
+agents:
+  A: {account: AI_QA_001}
+  B: {account: AI_QA_002}
+setup:
+  - give_item: {vnum: 10, count: 1}
+    agent: A
+  - set_gold: 500
+    agent: B
+steps:
+  - trade_with: {agent: B}
+    agent: A
+  - trade_add_item: {vnum: 10}
+    agent: A
+  - trade_set_gold: 300
+    agent: B
+  - trade_accept:
+    agent: A
+  - trade_accept:
+    agent: B
+assert:
+  - gold: {equals: 300}
+    agent: A
+  - conservation: {gold: true, vnums: [10]}   # toplam item/yang korunmalı: kopyalama/kayıp yok
+```
+
+Behaviour'lar: `trade_with, trade_add_item, trade_set_gold, trade_accept, trade_cancel,
+party_invite, party_accept, party_decline, party_leave, party_kick`. Assertion'lar: `conservation`,
+`trade`, `party`. Hazır senaryolar: `trade_item_for_gold`, `trade_change_after_accept`
+(onaydan sonra teklif değiştirme dolandırıcılığı), `trade_inventory_full`, `party_exp_share`.
+Gerçek client'ta her ajan ayrı `Metin2_QA.exe` örneğidir (`[bridge.agent_ports]`).
 
 ## Senaryo formatı
 
@@ -166,11 +234,14 @@ qa/build/      whitelist build/sunucu komutları
 qa/mcp_server.py, qa/cli.py, qa/service.py
 integration/   gerçek client/sunucu kodu + INTEGRATION.md
 scenarios/     örnek senaryolar
+qa/selection.py  değişikliğe göre test seçimi
+.github/       CI
 tests/         pytest (simülatöre karşı)
 ```
 
 ## Yol haritası
 
-Bu sürüm MVP'dir (bridge + test runner + MCP + keşif iskeleti). Sıradakiler: çoklu ajan
-(trade/party/guild/PvP — simülatör birden fazla bağlantıyı zaten destekliyor), gcov ile
-coverage yönlendirmeli senaryo üretimi, görsel assertion'lar, QA client'ta kanal değiştirme.
+Hazır: bridge, test runner, oracle, replay, MCP, keşif, değişikliğe göre seçim, CI, çoklu ajan
+(trade/party). Sıradakiler: otonom keşif ajanı (LLM API ile gece çalışan), guild/PvP/offline shop
+senaryoları, eşzamanlı (race condition) çoklu ajan adımları, gcov ile coverage yönlendirmeli
+senaryo üretimi, görsel assertion'lar, QA client'ta kanal değiştirme.

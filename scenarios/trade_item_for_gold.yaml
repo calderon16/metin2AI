@@ -1,0 +1,45 @@
+name: trade_item_for_gold
+description: >
+  İki QA oyuncusu takas yapar — A Kılıç (10) verir, B 300 yang verir.
+  Her iki tarafın envanteri/yangı ve toplam item/yang korunumu doğrulanır (kopyalama/kayıp yok).
+tags: [trade, multi-agent, gold, item]
+covers: ["exchange.cpp", "exchange.h", "uiExchange.py"]
+agents:
+  A: {account: AI_QA_001}
+  B: {account: AI_QA_002}
+setup:
+  - give_item: {vnum: 10, count: 1}
+    agent: A
+  - set_gold: 500
+    agent: B
+steps:
+  - trade_with: {agent: B}
+    agent: A
+    expect:
+      - trade: {open: true}
+        agent: B
+  - trade_add_item: {vnum: 10}
+    agent: A
+  - trade_set_gold: 300
+    agent: B
+    expect:
+      - trade: {open: true, my_accepted: false, their_accepted: false}
+        agent: A
+  - trade_accept:
+    agent: A
+  - trade_accept:
+    agent: B
+    expect:
+      - trade: {open: false}
+        agent: A
+assert:
+  - inventory_not_contains: 10
+    agent: A
+  - gold: {equals: 300}
+    agent: A
+  - item_count: {vnum: 10, equals: 1}
+    agent: B
+  - gold: {equals: 200}
+    agent: B
+  - conservation: {gold: true, vnums: [10]}
+  - server_event: {name: TRADE_COMPLETE, count: 1}

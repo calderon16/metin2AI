@@ -18,6 +18,11 @@ host = "127.0.0.1"
 port = 47800
 timeout_s = 15.0
 
+[bridge.agent_ports]
+# Çoklu ajan (tcp): her ajan ayrı Metin2_QA.exe örneği → ayrı port. Tanımsızsa port + ajan sırası.
+# AI_QA_001 = 47800
+# AI_QA_002 = 47801
+
 [accounts]
 allowed_prefix = "AI_QA_"
 default_account = "AI_QA_001"
@@ -51,3 +56,14 @@ error_patterns = ["SYSERR", "Traceback", "QUEST_ERROR", "SQL error"]
 [server.log_files]
 # syserr = "/usr/metin2/qa/channel1/core1/syserr"
 # syslog = "/usr/metin2/qa/channel1/core1/syslog"
+
+[selection]
+# Değişikliğe göre test seçimi (metin2-qa affected / MCP run_affected).
+# Varsayılan kurallar klasik Metin2 dosya adlarını kapsar (qa/config.py DEFAULT_SELECTION_RULES);
+# buradaki kurallar onlara eklenir. Hedef: etiket, "scenario:<ad>" veya "*".
+fallback = ["smoke"]
+always = ["smoke"]
+
+[selection.rules]
+# "pet_*.cpp" = ["pet"]
+# "offline_shop*" = ["shop", "scenario:offline_shop_basic"]

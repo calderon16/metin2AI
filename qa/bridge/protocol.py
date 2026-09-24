@@ -29,8 +29,9 @@ STATE_COMMANDS: dict[str, str] = {
     "get_inventory": "Envanter slotları + ekipman",
     "get_nearby_entities": "Yakındaki varlıklar. args: radius?, type? (monster|npc|pc|item), vnum?",
     "get_target": "Seçili hedef",
-    "get_open_windows": "Açık pencereler (dialog seçenekleri, shop içeriği dahil)",
+    "get_open_windows": "Açık pencereler (dialog, shop, trade, party_invite içerikleriyle)",
     "get_quest_state": "Görev durumları",
+    "get_party": "Grup: in_party, leader_vid, is_leader, members[]",
     "get_system_messages": "Sistem/chat mesajları. args: since?",
     "get_client_log": "İstemci log satırları. args: since?",
     "screenshot": "Ekran görüntüsü. yanıt: {format:'png', base64} veya {path}",
@@ -60,6 +61,17 @@ ACTION_COMMANDS: dict[str, str] = {
     "send_chat": "args: message",
     "respawn": "args: here? (true: olduğun yerde)",
     "change_channel": "args: channel",
+    # Ticaret (Metin2 exchange: istek iki tarafta pencereyi hemen açar)
+    "trade_request": "args: vid (oyuncu)",
+    "trade_add_item": "args: slot (tüm yığın eklenir)",
+    "trade_set_gold": "args: amount",
+    "trade_accept": "Onayla; iki taraf onaylayınca takas olur. Teklif değişirse onaylar sıfırlanır",
+    "trade_cancel": "",
+    # Grup
+    "party_invite": "args: vid (oyuncu)",
+    "party_answer": "args: accept (bool) — bekleyen daveti kabul/ret",
+    "party_leave": "",
+    "party_kick": "args: vid (yalnızca lider)",
 }
 
 # Yalnızca simülatörün sunduğu kontrol komutları (capability: sim_control / server_events).

@@ -399,6 +399,124 @@ def screenshot(ctx: GameContext, label: str = "shot") -> dict[str, Any]:
     return {"path": ctx.screenshot(label)}
 
 
+# ------------------------------------------------------------------ çoklu ajan: ticaret
+
+def _player_vid(ctx: GameContext, agent: str | None, vid: int | None) -> int:
+    if agent is not None:
+        return ctx.peer_vid(agent)
+    if vid is None:
+        raise BehaviourError("BAD_ARGS", "agent veya vid gerekli")
+    return vid
+
+
+def _wait_window(ctx: GameContext, name: str, timeout_ms: int) -> dict[str, Any]:
+    start = ctx.now()
+    while True:
+        w = ctx.windows().get(name)
+        if w is not None:
+            return w
+        if ctx.now() - start > timeout_ms:
+            raise BehaviourError("TIMEOUT", f"'{name}' penceresi açılmadı")
+        ctx.wait(200)
+
+
+@behaviour("trade_with")
+def trade_with(ctx: GameContext, agent: str | None = None, vid: int | None = None,
+               timeout_ms: int = 10000) -> dict[str, Any]:
+    """Oyuncuya (başka bir ajan veya vid) yaklaş ve ticaret başlat."""
+    target = _player_vid(ctx, agent, vid)
+    move_to_entity(ctx, vid=target, type="pc", range=500)
+    ctx.act("trade_request", vid=target)
+    ctx.react()
+    return _wait_window(ctx, "trade", timeout_ms)
+
+
+def _trade_window(ctx: GameContext) -> dict[str, Any]:
+    w = ctx.windows().get("trade")
+    if w is None:
+        raise BehaviourError("NO_TRADE", "Açık ticaret penceresi yok")
+    return w
+
+
+@behaviour("trade_add_item")
+def trade_add_item(ctx: GameContext, vnum: int | None = None, slot: int | None = None) -> dict[str, Any]:
+    """Envanterdeki item'i ticaret penceresine koy (yığının tamamı)."""
+    _trade_window(ctx)
+    ctx.act("trade_add_item", slot=_resolve_slot(ctx, vnum, slot))
+    ctx.react()
+    return _trade_window(ctx)
+
+
+@behaviour("trade_set_gold")
+def trade_set_gold(ctx: GameContext, amount: int) -> dict[str, Any]:
+    """Ticarete yang koy."""
+    _trade_window(ctx)
+    ctx.act("trade_set_gold", amount=amount)
+    ctx.react()
+    return _trade_window(ctx)
+
+
+@behaviour("trade_accept")
+def trade_accept(ctx: GameContext) -> dict[str, Any]:
+    """Ticareti onayla. İki taraf da onaylayınca takas gerçekleşir."""
+    _trade_window(ctx)
+    r = ctx.act("trade_accept")
+    ctx.react()
+    r = r if isinstance(r, dict) else {}
+    return {"completed": r.get("completed"), "cancelled": r.get("cancelled"), "trade_open": "trade" in ctx.windows()}
+
+
+@behaviour("trade_cancel")
+def trade_cancel(ctx: GameContext) -> dict[str, Any]:
+    """Ticareti iptal et."""
+    ctx.act("trade_cancel")
+    ctx.react()
+    return {}
+
+
+# ------------------------------------------------------------------ çoklu ajan: grup
+
+@behaviour("party_invite")
+def party_invite(ctx: GameContext, agent: str | None = None, vid: int | None = None) -> dict[str, Any]:
+    """Oyuncuyu gruba davet et."""
+    ctx.act("party_invite", vid=_player_vid(ctx, agent, vid))
+    ctx.react()
+    return {}
+
+
+@behaviour("party_accept")
+def party_accept(ctx: GameContext, timeout_ms: int = 10000) -> dict[str, Any]:
+    """Gelen grup davetini bekle ve kabul et."""
+    inv = _wait_window(ctx, "party_invite", timeout_ms)
+    ctx.react()
+    r = ctx.act("party_answer", accept=True)
+    return {"leader": inv.get("leader_name"), **(r or {})}
+
+
+@behaviour("party_decline")
+def party_decline(ctx: GameContext, timeout_ms: int = 10000) -> dict[str, Any]:
+    """Gelen grup davetini reddet."""
+    _wait_window(ctx, "party_invite", timeout_ms)
+    ctx.react()
+    return ctx.act("party_answer", accept=False)
+
+
+@behaviour("party_leave")
+def party_leave(ctx: GameContext) -> dict[str, Any]:
+    """Gruptan ayrıl."""
+    ctx.act("party_leave")
+    ctx.react()
+    return ctx.query("get_party")
+
+
+@behaviour("party_kick")
+def party_kick(ctx: GameContext, agent: str | None = None, vid: int | None = None) -> dict[str, Any]:
+    """Üyeyi gruptan at (lider)."""
+    ctx.act("party_kick", vid=_player_vid(ctx, agent, vid))
+    ctx.react()
+    return ctx.query("get_party")
+
+
 def login(ctx: GameContext) -> dict[str, Any]:
     if not ctx.account or ctx.password is None:
         raise BehaviourError("NO_ACCOUNT", "Hesap bilgisi yok")

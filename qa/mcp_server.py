@@ -26,7 +26,10 @@ normal oyuncu yolundan (login → paket → sunucu → DB) test eder.
   get_server_logs + get_screenshot ile kök nedeni bul → düzelt → tekrar çalıştır.
 - Hata gerçek mi? replay_failure(run_id) aynı seed ile tekrar oynatır ("REPRODUCED 3/3").
 - Serbest keşif: explore_start(goal) → explore_step(...) döngüsü → explore_finish(findings, save_as_scenario).
-- Setup (item/yang verme) sadece senaryonun `setup` bölümünde; adımlar gerçek oyuncu aksiyonlarıdır."""
+- Setup (item/yang verme) sadece senaryonun `setup` bölümünde; adımlar gerçek oyuncu aksiyonlarıdır.
+- Çoklu ajan (trade/party): senaryoda `agents: {A: {account: AI_QA_001}, B: {account: AI_QA_002}}`,
+  adım/assert'lerde `agent: B`. Takas gibi sistemlerde `conservation` assertion'ı ile toplam item/yang
+  korunumunu kontrol et (kopyalama/kayıp)."""
 
 mcp = FastMCP("metin2-qa", instructions=INSTRUCTIONS)
 _svc: QaService | None = None

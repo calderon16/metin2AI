@@ -66,7 +66,11 @@ Python tarafı için `app` modülüne sabit ekleyin (UserInterface/PythonApplica
 
 ```cpp
 #ifdef ENABLE_AI_QA_CLIENT
-	m_qaBridge.Initialize(47800); // istenirse komut satırından/metin2.cfg'den okunabilir
+	// Çoklu ajan için her istemci ayrı port: Metin2_QA.exe --qa-port 47801
+	unsigned short qaPort = 47800;
+	if (const char* p = strstr(GetCommandLineA(), "--qa-port "))
+		qaPort = (unsigned short)atoi(p + 10);
+	m_qaBridge.Initialize(qaPort);
 #endif
 ```
 
@@ -123,6 +127,30 @@ if app.ENABLE_AI_QA_CLIENT:
 	import qa_bridge
 	qa_bridge.OnShopOpen(vid)   # EndShop'ta: qa_bridge.OnShopClose()
 ```
+
+**Ticaret ve grup** — `game.py`:
+
+```python
+# StartExchange(self) / EndExchange(self)
+if app.ENABLE_AI_QA_CLIENT:
+	import qa_bridge
+	qa_bridge.OnTradeStart()            # EndExchange'te: qa_bridge.OnTradeEnd()
+
+# RecvPartyInviteQuestion(self, leaderVID, leaderName) — soru penceresini açmadan önce
+if app.ENABLE_AI_QA_CLIENT:
+	import qa_bridge
+	qa_bridge.OnPartyInvite(leaderVID, leaderName)
+
+# AddPartyMember(self, pid, name) / RemovePartyMember(self, pid) / ExitParty(self)
+if app.ENABLE_AI_QA_CLIENT:
+	import qa_bridge
+	qa_bridge.OnPartyMember(pid, name, is_leader=<lider mi>)   # Remove: OnPartyMemberRemoved(pid), Exit: OnPartyExit()
+```
+
+Aksiyonlar UI'nin kullandığı paketlerle gider: `net.SendExchangeStartPacket`,
+`SendExchangeItemAddPacket`, `SendExchangeElkAddPacket`, `SendExchangeAcceptPacket`,
+`SendExchangeExitPacket`, `SendPartyInvitePacket`, `SendPartyInviteAnswerPacket`,
+`SendPartyExitPacket`, `SendPartyRemovePacket`.
 
 **Görev diyaloğu** — `uiQuest.py`, `QuestDialog` seçenek butonları oluşturulduktan sonra
 (ör. `MakeQuestion` sonu). Metin ve seçenekleri toplayıp, seçimi normal buton tıklamasıyla
@@ -198,6 +226,10 @@ Test ettiğiniz sistemlerin kritik noktalarına ekleyin. Başlangıç için öne
 | `shop.cpp` `CShop::Buy` (başarılı) | `QA_EVENT("SHOP_BUY", ch, QA_KV("vnum", ...), QA_KV("price", ...))` |
 | `input_main.cpp` shop sell | `QA_EVENT("SHOP_SELL", ch, ...)` |
 | `char.cpp` `PointChange(POINT_GOLD)` sonrası | `QA_ASSERT(GetGold() >= 0, "PLAYER_NEGATIVE_GOLD", this, QA_KV("gold", GetGold()))` |
+| `exchange.cpp` `CExchange::Done` (başarılı) | `QA_EVENT("TRADE_COMPLETE", ch, QA_KV("partner", ...))` |
+| `exchange.cpp` iptal / `CheckSpace` başarısız | `QA_EVENT("TRADE_CANCEL", ch, QA_KV("reason", "INVENTORY_FULL"))` |
+| `party.cpp` Join / Quit / Destroy | `PARTY_JOIN`, `PARTY_LEAVE`, `PARTY_DISBAND` |
+| `char_battle.cpp` party exp dağıtımı | `QA_EVENT("PARTY_EXP", ch, QA_KV("total", ...), QA_KV("share", ...))` |
 | `questlua_*.cpp` hata dalları | `QA_ERROR("QUEST_ERROR", ch, QA_KV("quest", ...))` |
 | Yeni geliştirilen her sistem | durum geçişlerinde `QA_EVENT`, değişmezlerde `QA_ASSERT` |
 
@@ -233,6 +265,17 @@ syserr = "//qa-server/metin2/channel1/core1/syserr"
 server = ["ssh", "qa-server", "gmake -C /usr/metin2/src/game/src -j8"]
 client = ["msbuild", "C:/m2/client/Metin2Client.sln", "/p:Configuration=QA", "/m"]
 ```
+
+**Çoklu ajan** (trade/party senaryoları): her ajan ayrı bir `Metin2_QA.exe` örneğidir ve ayrı
+bridge portu dinler (ör. komut satırı `--qa-port 47801`). Portları eşleyin:
+
+```toml
+[bridge.agent_ports]
+AI_QA_001 = 47800
+AI_QA_002 = 47801
+```
+
+Tanımlı değilse `port + ajan sırası` kullanılır.
 
 Doğrulama sırası:
 1. `Metin2_QA.exe`'yi açın, login ekranında bekletin.

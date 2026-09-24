@@ -29,6 +29,10 @@ PLAYER_ATTACK_MS = 800
 MOB_ATTACK_MS = 1500
 MOB_RESPAWN_MS = 8000
 INVENTORY_SIZE = 45
+TRADE_RANGE = 1000
+TRADE_MAX_ITEMS = 12
+PARTY_MAX = 8
+PARTY_EXP_RANGE = 5000
 QA_PREFIX = "AI_QA_"
 MAP_SIZE = 25600
 
@@ -39,6 +43,10 @@ FAULTS: dict[str, str] = {
     "sell_no_gold": "NPC'ye satışta yang verilmez",
     "syserr_on_equip": "Ekipman giyilince sunucu SYSERR loglar",
     "negative_gold_on_buy": "Satın almada yang kontrolü yapılmaz (yang eksiye düşebilir)",
+    "trade_item_dupe": "Trade tamamlanınca veren taraf item'i kaybetmez (item kopyalama)",
+    "trade_gold_dupe": "Trade tamamlanınca veren tarafın yangı düşülmez (yang kopyalama)",
+    "trade_accept_not_reset": "Onaydan sonra teklif değişince onaylar sıfırlanmaz (dolandırıcılık açığı)",
+    "party_exp_dupe": "Party exp paylaşımında her üye tam exp alır",
 }
 
 ITEMS: dict[int, dict[str, Any]] = {
@@ -168,6 +176,26 @@ class Player:
         return True
 
 
+@dataclass
+class Trade:
+    a: Player
+    b: Player
+    items: dict[int, list[int]] = field(default_factory=dict)      # pid -> envanter slotları
+    gold: dict[int, int] = field(default_factory=dict)
+    accepted: dict[int, bool] = field(default_factory=dict)
+    completed: bool = False
+    cancel_reason: str | None = None
+
+    def partner(self, p: Player) -> Player:
+        return self.b if p is self.a else self.a
+
+
+@dataclass
+class Party:
+    leader: int                      # pid
+    members: list[int] = field(default_factory=list)
+
+
 class SimWorld:
     """Tek harita, birden fazla oyuncu barındırabilen sunucu tarafı."""
 
@@ -191,6 +219,9 @@ class SimWorld:
         self.server_events: list[dict[str, Any]] = []
         self._event_seq = 0
         self._assert_active: set[tuple[int, str]] = set()
+        self.trades: dict[int, Trade] = {}          # pid -> trade (iki taraf da aynı nesneyi görür)
+        self.parties: dict[int, Party] = {}         # pid -> party
+        self.party_invites: dict[int, int] = {}     # davet edilen pid -> davet eden pid
         for vnum, x, y in NPC_SPAWNS:
             self._spawn("npc", vnum, x, y)
         for vnum, cx, cy, n, r in MOB_GROUPS:
@@ -314,7 +345,7 @@ class SimWorld:
         proto = MOBS[m.vnum]
         self.server_event("event", "MOB_KILL", p, vnum=m.vnum, vid=m.vid)
         self.client_event(p, "entity_dead", vid=m.vid, vnum=m.vnum)
-        self._gain_exp(p, proto["exp"])
+        self._give_kill_exp(p, proto["exp"])
         if "no_drop" not in self.faults:
             for vnum, chance in proto["drops"]:
                 if self.rng.random() < chance:
@@ -332,6 +363,132 @@ class SimWorld:
             if q["progress"] >= q["goal"]:
                 q["state"] = "ready"
                 self.system_message(p, "Görev tamamlandı: Köy Muhafızı'na dön.")
+
+    def player_by_pid(self, pid: int) -> Player | None:
+        return next((p for p in self.players.values() if p.pid == pid), None)
+
+    def _give_kill_exp(self, p: Player, exp: int) -> None:
+        party = self.parties.get(p.pid)
+        if party is None:
+            self._gain_exp(p, exp)
+            return
+        near = [m for m in (self.player_by_pid(pid) for pid in party.members)
+                if m and m.in_game and not m.dead and m.map == p.map and dist(m.x, m.y, p.x, p.y) <= PARTY_EXP_RANGE]
+        share = exp if "party_exp_dupe" in self.faults else max(1, exp // len(near))
+        for m in near:
+            self._gain_exp(m, share)
+        self.server_event("event", "PARTY_EXP", p, total=exp, share=share, members=len(near))
+
+    # ------------------------------------------------------------ trade
+    def trade_view(self, p: Player) -> dict[str, Any] | None:
+        t = self.trades.get(p.pid)
+        if t is None:
+            return None
+        o = t.partner(p)
+
+        def items(pl: Player) -> list[dict[str, Any]]:
+            out = []
+            for slot in t.items.get(pl.pid, []):
+                it = pl.inventory[slot]
+                if it:
+                    out.append({"slot": slot, "vnum": it["vnum"], "count": it["count"], "name": ITEMS[it["vnum"]]["name"]})
+            return out
+
+        return {"partner_vid": o.vid, "partner_name": o.name, "my_items": items(p), "their_items": items(o),
+                "my_gold": t.gold.get(p.pid, 0), "their_gold": t.gold.get(o.pid, 0),
+                "my_accepted": t.accepted.get(p.pid, False), "their_accepted": t.accepted.get(o.pid, False)}
+
+    def trade_notify(self, t: Trade, event: str, **data: Any) -> None:
+        for pl in (t.a, t.b):
+            self.client_event(pl, event, **data)
+
+    def trade_changed(self, t: Trade) -> None:
+        if "trade_accept_not_reset" not in self.faults:
+            t.accepted = {}
+        self.trade_notify(t, "trade_updated")
+
+    def trade_cancel(self, t: Trade, reason: str, by: Player | None = None) -> None:
+        t.cancel_reason = reason
+        for pl in (t.a, t.b):
+            self.trades.pop(pl.pid, None)
+        self.trade_notify(t, "trade_cancelled", reason=reason)
+        self.server_event("event", "TRADE_CANCEL", by, reason=reason, a=t.a.name, b=t.b.name)
+
+    def trade_try_complete(self, t: Trade) -> None:
+        if not (t.accepted.get(t.a.pid) and t.accepted.get(t.b.pid)):
+            return
+        # Her iki tarafın yang ve envanter yeri kontrolü
+        for giver in (t.a, t.b):
+            if t.gold.get(giver.pid, 0) > giver.gold:
+                self.trade_cancel(t, "NOT_ENOUGH_GOLD", giver)
+                return
+        for recv in (t.a, t.b):
+            giver = t.partner(recv)
+            incoming = len(t.items.get(giver.pid, []))
+            free = sum(1 for s in recv.inventory if s is None) + len(t.items.get(recv.pid, []))
+            if incoming > free:
+                for pl in (t.a, t.b):
+                    self.system_message(pl, "Envanterde yeterli yer yok.")
+                self.trade_cancel(t, "INVENTORY_FULL", recv)
+                return
+        moved: dict[int, list[dict[str, int]]] = {}
+        for giver in (t.a, t.b):
+            out = []
+            for slot in t.items.get(giver.pid, []):
+                it = giver.inventory[slot]
+                if it is None:
+                    continue
+                out.append(dict(it))
+                if "trade_item_dupe" not in self.faults:
+                    giver.inventory[slot] = None
+            moved[giver.pid] = out
+        for giver in (t.a, t.b):
+            recv = t.partner(giver)
+            for it in moved[giver.pid]:
+                recv.add_item(it["vnum"], it["count"])
+            g = t.gold.get(giver.pid, 0)
+            if "trade_gold_dupe" not in self.faults:
+                giver.gold -= g
+            recv.gold += g
+        t.completed = True
+        for pl in (t.a, t.b):
+            self.trades.pop(pl.pid, None)
+        self.server_event("event", "TRADE_COMPLETE", t.a, partner=t.b.name,
+                          a_items=[i["vnum"] for i in moved[t.a.pid]], b_items=[i["vnum"] for i in moved[t.b.pid]],
+                          a_gold=t.gold.get(t.a.pid, 0), b_gold=t.gold.get(t.b.pid, 0))
+        self.trade_notify(t, "trade_completed")
+
+    # ------------------------------------------------------------ party
+    def party_view(self, p: Player) -> dict[str, Any]:
+        party = self.parties.get(p.pid)
+        if party is None:
+            return {"in_party": False, "members": []}
+        members = [m for m in (self.player_by_pid(pid) for pid in party.members) if m]
+        leader = self.player_by_pid(party.leader)
+        return {"in_party": True, "leader_vid": leader.vid if leader else None,
+                "leader_name": leader.name if leader else None, "is_leader": party.leader == p.pid,
+                "members": [{"vid": m.vid, "name": m.name, "level": m.level, "online": m.in_game} for m in members]}
+
+    def party_remove(self, p: Player, reason: str) -> None:
+        party = self.parties.pop(p.pid, None)
+        if party is None:
+            return
+        party.members.remove(p.pid)
+        self.client_event(p, "party_left", reason=reason)
+        self.server_event("event", "PARTY_LEAVE", p, reason=reason)
+        if party.leader == p.pid or len(party.members) < 2:
+            # Lider ayrılırsa ya da tek kişi kalırsa party dağılır
+            for pid in list(party.members):
+                self.parties.pop(pid, None)
+                m = self.player_by_pid(pid)
+                if m:
+                    self.client_event(m, "party_left", reason="DISBANDED")
+            self.server_event("event", "PARTY_DISBAND", p)
+        else:
+            for pid in party.members:
+                m = self.player_by_pid(pid)
+                if m:
+                    self.client_event(m, "party_updated", members=len(party.members))
 
     def _gain_exp(self, p: Player, exp: int) -> None:
         p.exp += exp
@@ -399,6 +556,8 @@ class SimClient:
 
     def close(self) -> None:
         if self.player:
+            if self.player.in_game:
+                self._leave_cleanup(self.player)
             self.player.in_game = False
         if self in self.world.clients:
             self.world.clients.remove(self)
@@ -443,6 +602,13 @@ class SimClient:
         p = self._need_game()
         if p.dead:
             raise SimError("DEAD", "Karakter ölü")
+        return p
+
+    def _need_free(self) -> Player:
+        """Trade açıkken item/dükkan/NPC işlemleri yapılamaz (Metin2 davranışı)."""
+        p = self._need_alive()
+        if p.pid in self.world.trades:
+            raise SimError("IN_TRADE", "Ticaret sırasında bu işlem yapılamaz")
         return p
 
     def _entity(self, vid: int) -> Entity:
@@ -524,7 +690,20 @@ class SimClient:
                 "hp_pct": round(100 * e.hp / e.max_hp) if e.max_hp else None}
 
     def cmd_get_open_windows(self) -> list[dict[str, Any]]:
-        return [{"name": k, **v} for k, v in self.windows.items()]
+        out = [{"name": k, **v} for k, v in self.windows.items()]
+        if self.player is not None:
+            tv = self.world.trade_view(self.player)
+            if tv:
+                out.append({"name": "trade", **tv})
+            inviter = self.world.party_invites.get(self.player.pid)
+            if inviter is not None:
+                leader = self.world.player_by_pid(inviter)
+                out.append({"name": "party_invite", "leader_vid": leader.vid if leader else None,
+                            "leader_name": leader.name if leader else None})
+        return out
+
+    def cmd_get_party(self) -> dict[str, Any]:
+        return self.world.party_view(self._need_game())
 
     def cmd_get_quest_state(self) -> dict[str, Any]:
         p = self._need_game()
@@ -581,8 +760,15 @@ class SimClient:
         self.log(f"map loaded {p.map}")
         return {"name": p.name, "map": p.map}
 
+    def _leave_cleanup(self, p: Player) -> None:
+        t = self.world.trades.get(p.pid)
+        if t:
+            self.world.trade_cancel(t, "PARTNER_LEFT", p)
+        self.world.party_invites.pop(p.pid, None)
+
     def cmd_logout(self) -> dict[str, Any]:
         p = self._need_game()
+        self._leave_cleanup(p)
         p.in_game, p.attacking, p.dest = False, False, None
         self.world.server_event("event", "LOGOUT", p)
         self.windows.clear()
@@ -594,6 +780,7 @@ class SimClient:
         p = self._need_alive()
         if not 1 <= int(channel) <= 4:
             raise SimError("BAD_CHANNEL", "Kanal 1-4 arası olmalı")
+        self._leave_cleanup(p)
         p.channel, p.attacking, p.target_vid, p.dest = int(channel), False, None, None
         self.windows.clear()
         self.world.advance(2000)
@@ -663,7 +850,7 @@ class SimClient:
 
     # ------------------------------------------------------------ item
     def cmd_pickup(self, vid: int) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         e = self._entity(vid)
         if e.type != "item":
             raise SimError("NOT_ITEM", "Bu bir item değil")
@@ -676,7 +863,7 @@ class SimClient:
         return {"vnum": e.vnum, "count": e.count}
 
     def cmd_use_item(self, slot: int) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         s = self._slot(p, slot)
         proto = ITEMS[s["vnum"]]
         if proto.get("wear"):
@@ -693,7 +880,7 @@ class SimClient:
         return {"hp": p.hp}
 
     def cmd_equip_item(self, slot: int) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         s = self._slot(p, slot)
         wear = ITEMS[s["vnum"]].get("wear")
         if not wear:
@@ -707,7 +894,7 @@ class SimClient:
         return {"wear": wear}
 
     def cmd_unequip_item(self, wear_slot: str) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         it = p.equipment.get(wear_slot)
         if not it:
             raise SimError("EMPTY_SLOT", "Ekipman slotu boş")
@@ -718,7 +905,7 @@ class SimClient:
         return {"slot": free[0]}
 
     def cmd_drop_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         s = self._slot(p, slot)
         n = s["count"] if count is None else int(count)
         if not 0 < n <= s["count"]:
@@ -732,7 +919,7 @@ class SimClient:
 
     # ------------------------------------------------------------ NPC / shop / dialog
     def cmd_talk_to_npc(self, vid: int) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         e = self._entity(vid)
         if e.type != "npc":
             raise SimError("NOT_NPC", "Bu bir NPC değil")
@@ -789,11 +976,139 @@ class SimClient:
         return {"selected": choice}
 
     def cmd_close_window(self, name: str) -> dict[str, Any]:
+        if name == "trade":
+            return self.cmd_trade_cancel()
+        if name == "party_invite":
+            return self.cmd_party_answer(False)
         self.windows.pop(name, None)
         return {}
 
-    def cmd_buy_item(self, slot: int) -> dict[str, Any]:
+    # ------------------------------------------------------------ trade (exchange)
+    def _trade(self, p: Player) -> Trade:
+        t = self.world.trades.get(p.pid)
+        if t is None:
+            raise SimError("NO_TRADE", "Açık ticaret yok")
+        return t
+
+    def cmd_trade_request(self, vid: int) -> dict[str, Any]:
         p = self._need_alive()
+        o = self.world.player_by_vid(int(vid))
+        if o is None or o is p:
+            raise SimError("NO_ENTITY", f"Oyuncu bulunamadı (VID {vid})")
+        if o.dead or o.map != p.map or dist(p.x, p.y, o.x, o.y) > TRADE_RANGE:
+            raise SimError("OUT_OF_RANGE", f"{o.name} çok uzakta")
+        if p.pid in self.world.trades or o.pid in self.world.trades:
+            raise SimError("ALREADY_TRADING", "Taraflardan biri zaten ticarette")
+        t = Trade(p, o)
+        self.world.trades[p.pid] = self.world.trades[o.pid] = t
+        self.world.client_event(p, "trade_started", partner_vid=o.vid, partner_name=o.name)
+        self.world.client_event(o, "trade_started", partner_vid=p.vid, partner_name=p.name)
+        self.world.server_event("event", "TRADE_START", p, partner=o.name)
+        return {"partner": o.name}
+
+    def cmd_trade_add_item(self, slot: int) -> dict[str, Any]:
+        p = self._need_alive()
+        t = self._trade(p)
+        self._slot(p, slot)
+        mine = t.items.setdefault(p.pid, [])
+        if slot in mine:
+            raise SimError("ALREADY_ADDED", "Item zaten eklendi")
+        if len(mine) >= TRADE_MAX_ITEMS:
+            raise SimError("TRADE_FULL", "Ticaret penceresi dolu")
+        mine.append(slot)
+        self.world.trade_changed(t)
+        return {}
+
+    def cmd_trade_set_gold(self, amount: int) -> dict[str, Any]:
+        p = self._need_alive()
+        t = self._trade(p)
+        amount = int(amount)
+        if amount < 0 or amount > p.gold:
+            self.push_message("Yeterli Yang yok.")
+            raise SimError("NOT_ENOUGH_GOLD", "Yetersiz yang")
+        t.gold[p.pid] = amount
+        self.world.trade_changed(t)
+        return {}
+
+    def cmd_trade_accept(self) -> dict[str, Any]:
+        p = self._need_alive()
+        t = self._trade(p)
+        t.accepted[p.pid] = True
+        self.world.trade_notify(t, "trade_updated")
+        self.world.trade_try_complete(t)
+        return {"completed": t.completed, "cancelled": t.cancel_reason}
+
+    def cmd_trade_cancel(self) -> dict[str, Any]:
+        p = self._need_game()
+        self.world.trade_cancel(self._trade(p), "CANCELLED", p)
+        return {}
+
+    # ------------------------------------------------------------ party
+    def cmd_party_invite(self, vid: int) -> dict[str, Any]:
+        p = self._need_alive()
+        o = self.world.player_by_vid(int(vid))
+        if o is None or o is p:
+            raise SimError("NO_ENTITY", f"Oyuncu bulunamadı (VID {vid})")
+        party = self.world.parties.get(p.pid)
+        if party and party.leader != p.pid:
+            raise SimError("NOT_LEADER", "Sadece lider davet edebilir")
+        if o.pid in self.world.parties:
+            raise SimError("ALREADY_IN_PARTY", f"{o.name} zaten bir grupta")
+        if party and len(party.members) >= PARTY_MAX:
+            raise SimError("PARTY_FULL", "Grup dolu")
+        self.world.party_invites[o.pid] = p.pid
+        self.world.client_event(o, "party_invite", leader_vid=p.vid, leader_name=p.name)
+        return {}
+
+    def cmd_party_answer(self, accept: bool = True) -> dict[str, Any]:
+        p = self._need_game()
+        inviter_pid = self.world.party_invites.pop(p.pid, None)
+        if inviter_pid is None:
+            raise SimError("NO_INVITE", "Bekleyen grup daveti yok")
+        leader = self.world.player_by_pid(inviter_pid)
+        if not accept:
+            if leader:
+                self.world.client_event(leader, "party_invite_declined", name=p.name)
+            return {"joined": False}
+        if leader is None or not leader.in_game:
+            raise SimError("NO_LEADER", "Davet eden oyuncu çevrimdışı")
+        if p.pid in self.world.parties:
+            raise SimError("ALREADY_IN_PARTY", "Zaten bir gruptasın")
+        party = self.world.parties.get(leader.pid)
+        if party is None:
+            party = Party(leader=leader.pid, members=[leader.pid])
+            self.world.parties[leader.pid] = party
+        if len(party.members) >= PARTY_MAX:
+            raise SimError("PARTY_FULL", "Grup dolu")
+        party.members.append(p.pid)
+        self.world.parties[p.pid] = party
+        for pid in party.members:
+            m = self.world.player_by_pid(pid)
+            if m:
+                self.world.client_event(m, "party_joined", name=p.name, members=len(party.members))
+        self.world.server_event("event", "PARTY_JOIN", p, leader=leader.name, members=len(party.members))
+        return {"joined": True, "members": len(party.members)}
+
+    def cmd_party_leave(self) -> dict[str, Any]:
+        p = self._need_game()
+        if p.pid not in self.world.parties:
+            raise SimError("NOT_IN_PARTY", "Grupta değilsin")
+        self.world.party_remove(p, "LEFT")
+        return {}
+
+    def cmd_party_kick(self, vid: int) -> dict[str, Any]:
+        p = self._need_game()
+        party = self.world.parties.get(p.pid)
+        if party is None or party.leader != p.pid:
+            raise SimError("NOT_LEADER", "Sadece lider atabilir")
+        o = next((pl for pl in self.world.players.values() if pl.vid == int(vid)), None)
+        if o is None or o.pid not in party.members or o is p:
+            raise SimError("NOT_MEMBER", "Bu oyuncu grupta değil")
+        self.world.party_remove(o, "KICKED")
+        return {}
+
+    def cmd_buy_item(self, slot: int) -> dict[str, Any]:
+        p = self._need_free()
         shop = self.windows.get("shop")
         if not shop:
             raise SimError("NO_SHOP", "Açık dükkan yok")
@@ -811,7 +1126,7 @@ class SimClient:
         return {"vnum": it["vnum"], "gold": p.gold}
 
     def cmd_sell_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
-        p = self._need_alive()
+        p = self._need_free()
         if "shop" not in self.windows:
             raise SimError("NO_SHOP", "Açık dükkan yok")
         s = self._slot(p, slot)

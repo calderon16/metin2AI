@@ -95,7 +95,7 @@ def test_file_and_log_sources(tmp_path):
     log = tmp_path / "syserr"
     ev.write_text('{"type":"event","name":"OLD"}\n')
     log.write_text("eski satır\n")
-    sig = ServerSignals([FileEventSource(ev), LogFileSource("syserr", log, ["SYSERR"])], character="AI_QA_001")
+    sig = ServerSignals([FileEventSource(ev), LogFileSource("syserr", log, ["SYSERR"])], characters={"AI_QA_001"})
     sig.mark()
     with ev.open("a") as f:
         f.write('{"type":"assert_fail","name":"PLAYER_NEGATIVE_GOLD","player":"AI_QA_001"}\n')

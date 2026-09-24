@@ -1,0 +1,38 @@
+name: trade_inventory_full
+description: >
+  Edge-case — B'nin envanteri tamamen doluyken A'nın verdiği Tahta Zırh sığmaz.
+  Takas iptal edilmeli, hiçbir item kaybolmamalı veya kopyalanmamalı.
+tags: [trade, multi-agent, edge-case, inventory]
+covers: ["exchange.cpp"]
+agents:
+  A: {account: AI_QA_001}
+  B: {account: AI_QA_002}
+setup:
+  - give_item: {vnum: 11200, count: 1}
+    agent: A
+  - give_item: {vnum: 10, count: 45}
+    agent: B
+steps:
+  - trade_with: {agent: B}
+    agent: A
+  - trade_add_item: {vnum: 11200}
+    agent: A
+  - trade_accept:
+    agent: A
+  - trade_accept:
+    agent: B
+    expect:
+      - trade: {open: false}
+        agent: A
+      - system_message: yeterli yer yok
+        agent: B
+assert:
+  - inventory_contains: {vnum: 11200, count: 1, exact: true}
+    agent: A
+  - item_count: {vnum: 10, equals: 45}
+    agent: B
+  - inventory_not_contains: 11200
+    agent: B
+  - conservation
+  - server_event: {name: TRADE_COMPLETE, count: 0}
+  - server_event: {name: TRADE_CANCEL, count: 1, match: {reason: INVENTORY_FULL}}

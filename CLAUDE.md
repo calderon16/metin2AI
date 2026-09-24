@@ -10,9 +10,12 @@
 - Yeni behaviour: `qa/engine/behaviours.py` içinde `@behaviour("ad")`; yeni assertion:
   `qa/oracle/assertions.py` içinde `@assertion("ad")`. Şema ve MCP referansı otomatik güncellenir.
 - Test adımları yalnızca oyuncu aksiyonlarını kullanır; `/qa` komutları sadece senaryonun `setup` bölümünde.
+- Yeni senaryoya test ettiği kaynak dosyaları `covers:` ile yaz; `run_affected` seçimi buna dayanır.
+- Çoklu ajan senaryolarında (trade, party, pazar) her zaman `conservation` assertion'ı ekle.
+- Senaryolar seed'e bağlı kararsız olmamalı: yeni senaryoyu birkaç farklı seed ile çalıştırıp doğrula.
 
 ## QA döngüsü (MCP `metin2-qa`)
-Metin2 kaynağında değişiklik yaptıktan sonra: `build` → `run_scenario`/`run_suite` →
+Metin2 kaynağında değişiklik yaptıktan sonra: `build` → `run_affected` (değişen dosyalara göre) →
 FAILED ise `get_test_result`, `get_trace`, `get_server_logs`, `get_screenshot` ile kök nedeni bul →
 düzelt → tekrar çalıştır → `replay_failure(eski_run)` ile düzeltmeyi doğrula. Yeni bir sistem
 geliştirdiğinde onun senaryosunu da `write_scenario` ile ekle.

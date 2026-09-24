@@ -58,15 +58,16 @@ class Trace:
         for e in self.entries:
             t = e["t"]
             ts = f"{t // 60000:02d}:{(t // 1000) % 60:02d}.{t % 1000:03d}"
+            who = f"{e['agent']}: " if e.get("agent") else ""
             if e["kind"] == "action":
                 args = " ".join(f"{k}={v}" for k, v in (e.get("args") or {}).items())
                 status = "OK" if e.get("ok") else f"ERR {e.get('error')}"
-                lines.append(f"{ts} [{e['step']}] {e['cmd']} {args} -> {status}")
+                lines.append(f"{ts} [{e['step']}] {who}{e['cmd']} {args} -> {status}")
             elif e["kind"] == "event":
-                lines.append(f"{ts} [{e['step']}]   <- {e['event']} {e.get('data')}")
+                lines.append(f"{ts} [{e['step']}] {who}  <- {e['event']} {e.get('data')}")
             else:
-                rest = {k: v for k, v in e.items() if k not in {"seq", "t", "step", "kind"}}
-                lines.append(f"{ts} [{e['step']}] {e['kind'].upper()} {rest}")
+                rest = {k: v for k, v in e.items() if k not in {"seq", "t", "step", "kind", "agent"}}
+                lines.append(f"{ts} [{e['step']}] {who}{e['kind'].upper()} {rest}")
         return "\n".join(lines)
 
 
@@ -81,6 +82,23 @@ class GameContext:
     screenshot_sink: Callable[[str, bytes, str], str] | None = None
     step: int | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    # Çoklu ajan: bu bağlamın ajan adı ve diğer ajanların bağlamları (ad -> GameContext)
+    agent: str | None = None
+    peers: dict[str, "GameContext"] = field(default_factory=dict)
+
+    def _tag(self) -> dict[str, Any]:
+        return {"agent": self.agent} if self.agent else {}
+
+    def peer(self, name: str) -> "GameContext":
+        if name not in self.peers:
+            raise BehaviourError("UNKNOWN_AGENT", f"Ajan bulunamadı: {name}", agents=sorted(self.peers))
+        return self.peers[name]
+
+    def peer_vid(self, name: str) -> int:
+        vid = self.peer(name).state().get("vid")
+        if not vid:
+            raise BehaviourError("AGENT_NOT_IN_GAME", f"{name} oyunda değil")
+        return vid
 
     # ------------------------------------------------------------------ çekirdek
     def now(self) -> int:
@@ -90,7 +108,8 @@ class GameContext:
         for ev in self.bridge.drain_events():
             ev = {**ev, "step": self.step}
             self.events.append(ev)
-            self.trace.add("event", ev.get("t", self.now()), self.step, event=ev["event"], data=ev.get("data"))
+            self.trace.add("event", ev.get("t", self.now()), self.step, event=ev["event"], data=ev.get("data"),
+                           **self._tag())
 
     def act(self, cmd: str, **args: Any) -> Any:
         """Oyuncu aksiyonu: trace'e yazılır, reddedilirse ActionError."""
@@ -98,10 +117,11 @@ class GameContext:
             data = self.bridge.call(cmd, **args)
         except ActionError as e:
             self.trace.add("action", self.now(), self.step, cmd=cmd, args=_trace_args(cmd, args),
-                           ok=False, error=f"{e.code}: {e.message}")
+                           ok=False, error=f"{e.code}: {e.message}", **self._tag())
             self._collect_events()
             raise
-        self.trace.add("action", self.now(), self.step, cmd=cmd, args=_trace_args(cmd, args), ok=True)
+        self.trace.add("action", self.now(), self.step, cmd=cmd, args=_trace_args(cmd, args), ok=True,
+                       **self._tag())
         self._collect_events()
         return data
 
@@ -112,7 +132,7 @@ class GameContext:
         return data
 
     def note(self, kind: str, **fields: Any) -> None:
-        self.trace.add(kind, self.now(), self.step, **fields)
+        self.trace.add(kind, self.now(), self.step, **{**self._tag(), **fields})
 
     # ------------------------------------------------------------------ kısayollar
     def state(self) -> dict[str, Any]:

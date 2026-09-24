@@ -59,3 +59,15 @@ def test_world_is_deterministic():
         return b.call("get_nearby_entities", type="monster", radius=20000)
     assert run(5) == run(5)
     assert run(5) != run(6)
+
+
+def test_real_client_bridge_implements_protocol():
+    """integration/client/qa_bridge.py, simülatöre özel olanlar dışında tüm komutları karşılamalı."""
+    import re
+    from pathlib import Path
+
+    from qa.bridge.protocol import SIM_COMMANDS
+
+    src = (Path(__file__).resolve().parents[1] / "integration/client/qa_bridge.py").read_text(encoding="utf-8")
+    client = set(re.findall(r"^def cmd_(\w+)\(", src, re.M)) | {"wait"}
+    assert set(ALL_COMMANDS) - set(SIM_COMMANDS) - client == set()

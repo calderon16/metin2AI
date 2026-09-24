@@ -31,7 +31,7 @@ from ..engine import behaviours  # noqa: F401  (BEHAVIOURS registry'i doldurur)
 from ..engine.executor import BEHAVIOURS
 from ..oracle.assertions import normalize_assert_args
 
-STEP_META_KEYS = {"expect", "label", "continue_on_failure", "expect_error"}
+STEP_META_KEYS = {"expect", "label", "continue_on_failure", "expect_error", "agent"}
 
 # setup işlemi -> sunucuya gönderilecek `/qa` komutu
 SETUP_OPS: dict[str, str] = {
@@ -66,19 +66,33 @@ def _split(raw: Any, kind: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
     return name, args, meta
 
 
+def _only_agent_meta(meta: dict[str, Any], kind: str) -> str | None:
+    extra = set(meta) - {"agent"}
+    if extra:
+        raise ValueError(f"{kind} içinde {sorted(extra)} kullanılamaz")
+    return meta.get("agent")
+
+
+def _with_agent(base: Any, agent: str | None) -> Any:
+    if agent is None:
+        return base
+    return {**(base if isinstance(base, dict) else {base: None}), "agent": agent}
+
+
 class AssertSpec(BaseModel):
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
+    # Çoklu ajanda hangi ajanın durumuna bakılacağı (verilmezse ilk ajan)
+    agent: str | None = None
 
     @classmethod
     def parse(cls, raw: Any) -> "AssertSpec":
         name, args, meta = _split(raw, "assert")
-        if meta:
-            raise ValueError(f"assert içinde {sorted(meta)} kullanılamaz")
-        return cls(name=name, args=normalize_assert_args(name, args))
+        agent = _only_agent_meta(meta, "assert")
+        return cls(name=name, args=normalize_assert_args(name, args), agent=agent)
 
     def to_yaml(self) -> Any:
-        return {self.name: self.args} if self.args else self.name
+        return _with_agent({self.name: self.args} if self.args else self.name, self.agent)
 
 
 class Step(BaseModel):
@@ -89,6 +103,8 @@ class Step(BaseModel):
     # Adımın bu hata koduyla reddedilmesi bekleniyor (ör. NOT_ENOUGH_GOLD) — edge-case testleri için
     expect_error: str | None = None
     continue_on_failure: bool = False
+    # Çoklu ajanda adımı hangi ajan yapar (verilmezse ilk ajan)
+    agent: str | None = None
 
     @classmethod
     def parse(cls, raw: Any) -> "Step":
@@ -102,7 +118,7 @@ class Step(BaseModel):
             raise ValueError(f"{name}: {e}") from e
         return cls(name=name, args=args, label=meta.get("label"),
                    expect=[AssertSpec.parse(a) for a in meta.get("expect") or []],
-                   expect_error=meta.get("expect_error"),
+                   expect_error=meta.get("expect_error"), agent=meta.get("agent"),
                    continue_on_failure=bool(meta.get("continue_on_failure", False)))
 
     def to_yaml(self) -> Any:
@@ -115,19 +131,22 @@ class Step(BaseModel):
             d["expect_error"] = self.expect_error
         if self.continue_on_failure:
             d["continue_on_failure"] = True
+        if self.agent:
+            d["agent"] = self.agent
         return d if len(d) > 1 or self.args else self.name
 
 
 class SetupOp(BaseModel):
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
+    agent: str | None = None
 
     @classmethod
     def parse(cls, raw: Any) -> "SetupOp":
         name, args, meta = _split(raw, "setup")
-        if meta or name not in SETUP_OPS:
+        if name not in SETUP_OPS:
             raise ValueError(f"Bilinmeyen setup işlemi: {name}. Mevcut: {sorted(SETUP_OPS)}")
-        return cls(name=name, args=args)
+        return cls(name=name, args=args, agent=_only_agent_meta(meta, "setup"))
 
     def to_command(self) -> str:
         a = self.args
@@ -150,8 +169,9 @@ class SetupOp(BaseModel):
 
     def to_yaml(self) -> Any:
         if not self.args:
-            return self.name
-        return {self.name: self.args["value"] if list(self.args) == ["value"] else self.args}
+            return _with_agent(self.name, self.agent)
+        return _with_agent({self.name: self.args["value"] if list(self.args) == ["value"] else self.args},
+                           self.agent)
 
 
 class OracleOptions(BaseModel):
@@ -159,6 +179,12 @@ class OracleOptions(BaseModel):
     # Varsayılan olarak her run'da SYSERR/log hatası ve QA_ASSERT ihlali olmaması beklenir
     allow_server_errors: bool = False
     allow_qa_asserts: bool = False
+
+
+class AgentSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account: str
+    character: str | None = None
 
 
 class Scenario(BaseModel):
@@ -171,6 +197,8 @@ class Scenario(BaseModel):
     covers: list[str] = Field(default_factory=list)
     account: str | None = None
     character: str | None = None
+    # Çoklu ajan: ad -> hesap. İlk ajan "birincil"dir (agent verilmeyen adımlar onundur).
+    agents: dict[str, AgentSpec] = Field(default_factory=dict)
     seed: int | None = None
     reset: bool = True
     timeout_ms: int = 600000
@@ -189,6 +217,32 @@ class Scenario(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", v):
             raise ValueError("name yalnızca harf, rakam, _ ve - içerebilir")
         return v
+
+    @model_validator(mode="after")
+    def _check_agents(self) -> "Scenario":
+        import re
+
+        if self.agents and (self.account or self.character):
+            raise ValueError("agents kullanılırken account/character yerine agents içindeki hesaplar kullanılır")
+        for n in self.agents:
+            if not re.fullmatch(r"[A-Za-z0-9_]{1,32}", n):
+                raise ValueError(f"Geçersiz ajan adı: {n!r}")
+        accounts = [a.account for a in self.agents.values()]
+        if len(set(accounts)) != len(accounts):
+            raise ValueError("Her ajanın hesabı farklı olmalı")
+        refs = [("setup", x.agent) for x in self.setup] + [("steps", x.agent) for x in self.steps]
+        refs += [("assert", x.agent) for x in self.asserts]
+        refs += [("expect", e.agent) for st in self.steps for e in st.expect]
+        for where, a in refs:
+            if a is not None and a not in self.agents:
+                raise ValueError(f"{where}: bilinmeyen ajan '{a}' (tanımlı: {sorted(self.agents) or 'yok'})")
+        return self
+
+    def agent_specs(self) -> dict[str, AgentSpec]:
+        """Tek ajanlı senaryolar için de tek elemanlı ajan listesi döndür."""
+        if self.agents:
+            return dict(self.agents)
+        return {"": AgentSpec.model_construct(account=self.account, character=self.character)}
 
     @model_validator(mode="before")
     @classmethod
@@ -210,6 +264,8 @@ class Scenario(BaseModel):
             v = getattr(self, k)
             if v:
                 d[k] = v
+        if self.agents:
+            d["agents"] = {k: v.model_dump(exclude_none=True) for k, v in self.agents.items()}
         if not self.reset:
             d["reset"] = False
         if self.oracle != OracleOptions():

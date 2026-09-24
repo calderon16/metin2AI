@@ -37,6 +37,8 @@ class Observation:
         self.baseline = baseline
         self.signals = signals
         self._cache: dict[str, Any] = {}
+        # Çoklu ajan: tüm ajanların gözlemleri (ajan adı -> Observation); tek ajanda boş
+        self.group: dict[str, "Observation"] = {}
 
     def _get(self, key: str, fn: Callable[[], Any]) -> Any:
         if key not in self._cache:
@@ -60,6 +62,10 @@ class Observation:
         return self._get("windows", self.ctx.windows)
 
     @property
+    def party(self) -> dict[str, Any]:
+        return self._get("party", lambda: self.ctx.query("get_party"))
+
+    @property
     def messages(self) -> list[dict[str, Any]]:
         return self._get("messages", lambda: self.ctx.query("get_system_messages", since=0))
 
@@ -73,6 +79,9 @@ def take_snapshot(ctx: GameContext) -> dict[str, Any]:
 
 
 ASSERTIONS: dict[str, Callable[..., AssertionResult]] = {}
+
+# Tek bir ajana değil tüm run'a ait kontroller (raporda ajan etiketi almaz)
+GROUP_ASSERTIONS = {"conservation", "server_errors", "qa_asserts", "server_event"}
 
 
 def assertion(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -273,6 +282,90 @@ def qa_asserts(obs: Observation, equals: int = 0) -> AssertionResult:
     fails = obs.signals.assert_failures
     return AssertionResult("qa_asserts", {"equals": equals}, len(fails) == equals, {"equals": equals},
                            {"count": len(fails), "asserts": fails[:10]})
+
+
+# ---------------------------------------------------------------------- çoklu ajan
+
+def _holdings(inv: dict[str, Any]) -> dict[int, int]:
+    """Envanter + ekipmandaki item adetleri."""
+    c: dict[int, int] = {}
+    for i in inv["items"]:
+        c[i["vnum"]] = c.get(i["vnum"], 0) + i["count"]
+    for e in inv.get("equipment", {}).values():
+        c[e["vnum"]] = c.get(e["vnum"], 0) + 1
+    return c
+
+
+@assertion("conservation")
+def conservation(obs: Observation, gold: bool = True, vnums: list[int] | None = None) -> AssertionResult:
+    """Ajanlar arası korunum: toplam yang ve item adetleri başlangıçla aynı olmalı.
+    Trade/pazar gibi sistemlerde item/yang kopyalama ya da kaybını yakalar."""
+    group = obs.group or {"": obs}
+    before_items: dict[int, int] = {}
+    after_items: dict[int, int] = {}
+    per_agent: dict[str, Any] = {}
+    g_before = g_after = 0
+    for name, o in group.items():
+        hb, ha = _holdings(o.baseline["inventory"]), _holdings(o.inventory)
+        for v, n in hb.items():
+            before_items[v] = before_items.get(v, 0) + n
+        for v, n in ha.items():
+            after_items[v] = after_items.get(v, 0) + n
+        gb, ga = o.baseline["state"].get("gold", 0), o.state.get("gold", 0)
+        g_before += gb
+        g_after += ga
+        per_agent[name or "main"] = {"gold": [gb, ga], "items": {v: [hb.get(v, 0), ha.get(v, 0)]
+                                                                 for v in sorted(set(hb) | set(ha))
+                                                                 if vnums is None or v in vnums}}
+    keys = sorted(set(before_items) | set(after_items)) if vnums is None else list(vnums)
+    exp_items = {v: before_items.get(v, 0) for v in keys}
+    act_items = {v: after_items.get(v, 0) for v in keys}
+    ok = exp_items == act_items and (not gold or g_before == g_after)
+    expected: dict[str, Any] = {"items": exp_items}
+    actual: dict[str, Any] = {"items": act_items, "per_agent": per_agent}
+    if gold:
+        expected["total_gold"], actual["total_gold"] = g_before, g_after
+    diff = {v: act_items[v] - exp_items[v] for v in keys if act_items[v] != exp_items[v]}
+    msg = "" if ok else f"Korunum bozuldu: item farkı={diff}" + (
+        f", yang farkı={g_after - g_before}" if gold and g_after != g_before else "")
+    return AssertionResult("conservation", {"gold": gold, "vnums": vnums}, ok, expected, actual, msg)
+
+
+@assertion("party")
+def party(obs: Observation, in_party: bool | None = None, size: int | None = None,
+          leader: str | None = None, is_leader: bool | None = None) -> AssertionResult:
+    """Grup durumu. leader: lider olması beklenen ajanın adı."""
+    p = obs.party
+    expected = {k: v for k, v in {"in_party": in_party, "size": size, "leader": leader,
+                                  "is_leader": is_leader}.items() if v is not None}
+    actual = {"in_party": p.get("in_party"), "size": len(p.get("members", [])),
+              "leader_name": p.get("leader_name"), "is_leader": p.get("is_leader", False)}
+    ok = (in_party is None or p.get("in_party") == in_party) and (size is None or actual["size"] == size) \
+        and (is_leader is None or actual["is_leader"] == is_leader)
+    if leader is not None:
+        lo = obs.group.get(leader)
+        if lo is None:
+            return AssertionResult("party", expected, False, expected, actual, f"Bilinmeyen ajan: {leader}")
+        ok &= p.get("leader_vid") is not None and p.get("leader_vid") == lo.state.get("vid")
+    return AssertionResult("party", expected, ok, expected, actual)
+
+
+@assertion("trade")
+def trade(obs: Observation, open: bool = True, my_accepted: bool | None = None,
+          their_accepted: bool | None = None) -> AssertionResult:
+    """Ticaret penceresinin durumu (açık mı, kim onayladı)."""
+    w = obs.windows.get("trade")
+    expected = {k: v for k, v in {"open": open, "my_accepted": my_accepted,
+                                  "their_accepted": their_accepted}.items() if v is not None}
+    actual = {"open": w is not None}
+    if w:
+        actual.update(my_accepted=w.get("my_accepted"), their_accepted=w.get("their_accepted"),
+                      my_gold=w.get("my_gold"), their_gold=w.get("their_gold"),
+                      my_items=[i["vnum"] for i in w.get("my_items", [])],
+                      their_items=[i["vnum"] for i in w.get("their_items", [])])
+    ok = actual["open"] == open and (my_accepted is None or actual.get("my_accepted") == my_accepted) \
+        and (their_accepted is None or actual.get("their_accepted") == their_accepted)
+    return AssertionResult("trade", expected, ok, expected, actual)
 
 
 # ---------------------------------------------------------------------- yardımcılar

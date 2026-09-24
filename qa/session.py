@@ -19,12 +19,15 @@ class BridgeFactory:
     def is_sim(self) -> bool:
         return self.cfg.bridge.mode == "sim"
 
-    def open(self) -> Bridge:
+    def open(self, account: str | None = None, index: int = 0) -> Bridge:
+        """account/index: çoklu ajanda her ajan ayrı istemcidir. TCP'de port önce
+        [bridge.agent_ports][account]'tan, yoksa `port + index`'ten alınır."""
         b = self.cfg.bridge
         if b.mode == "sim":
             world = self.world or SimWorld(password=self.cfg.accounts.password)
             client = SimClient(world)
             return LocalBridge(client.handle, on_close=client.close)
         if b.mode == "tcp":
-            return TcpBridge(b.host, b.port, b.timeout_s)
+            port = b.agent_ports.get(account or "", b.port + index)
+            return TcpBridge(b.host, port, b.timeout_s)
         raise ValueError(f"Bilinmeyen bridge modu: {b.mode}")

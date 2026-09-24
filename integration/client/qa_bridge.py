@@ -42,6 +42,11 @@ try:
 except ImportError:
 	quest = None
 
+try:
+	import exchange
+except ImportError:
+	exchange = None
+
 PROTOCOL_VERSION = 1
 CAPABILITIES = ["screenshot"]
 
@@ -68,6 +73,9 @@ _attack = [0]          # saldırı başlatılan vid (ölüm tespiti için)
 _dialog = [None]       # {"text", "options", "select", "close"}
 _shop = [None]         # {"vid"}
 _screenshot_seq = [0]
+_trade = [None]        # {"partner_vid"} — game.py StartExchange/EndExchange kancaları
+_party_invite = [None] # {"leader_vid", "leader_name"}
+_party = {"members": {}, "leader_pid": None}   # pid -> ad (game.py AddPartyMember/RemovePartyMember)
 
 
 def _now():
@@ -118,6 +126,8 @@ def OnLeaveGame():
 	_in_game[0] = False
 	_dialog[0] = None
 	_shop[0] = None
+	_trade[0] = None
+	_party_invite[0] = None
 
 
 def OnQuestDialog(text, options, select_fn, close_fn):
@@ -137,6 +147,39 @@ def OnShopOpen(vid):
 
 def OnShopClose():
 	_shop[0] = None
+
+
+def OnTradeStart(partner_vid=None):
+	_trade[0] = {"partner_vid": partner_vid or (_trade[0] or {}).get("partner_vid")}
+	_event("trade_started", {"partner_vid": _trade[0]["partner_vid"]})
+
+
+def OnTradeEnd():
+	_trade[0] = None
+	_event("trade_closed", {})
+
+
+def OnPartyInvite(leader_vid, leader_name):
+	_party_invite[0] = {"leader_vid": leader_vid, "leader_name": leader_name}
+	_event("party_invite", {"leader_vid": leader_vid, "leader_name": leader_name})
+
+
+def OnPartyMember(pid, name, is_leader=False):
+	_party["members"][pid] = name
+	if is_leader:
+		_party["leader_pid"] = pid
+	_event("party_joined", {"name": name, "members": len(_party["members"])})
+
+
+def OnPartyMemberRemoved(pid):
+	_party["members"].pop(pid, None)
+	_event("party_updated", {"members": len(_party["members"])})
+
+
+def OnPartyExit():
+	_party["members"].clear()
+	_party["leader_pid"] = None
+	_event("party_left", {})
 
 
 # ------------------------------------------------------------------ yardımcılar
@@ -254,7 +297,50 @@ def cmd_get_open_windows(a):
 				item.SelectItem(vnum)
 				items.append({"slot": i, "vnum": vnum, "name": item.GetItemName(), "price": shop.GetItemPrice(i)})
 		out.append({"name": "shop", "npc_vid": _shop[0]["vid"], "items": items})
+	if _trade[0] and exchange:
+		out.append(dict({"name": "trade"}, **_trade_view()))
+	if _party_invite[0]:
+		out.append(dict({"name": "party_invite"}, **_party_invite[0]))
 	return out
+
+
+def _trade_view():
+	n = getattr(exchange, "EXCHANGE_ITEM_MAX_NUM", 12)
+
+	def items(get_vnum, get_count):
+		out = []
+		for i in xrange(n):
+			vnum = get_vnum(i)
+			if vnum:
+				item.SelectItem(vnum)
+				out.append({"slot": i, "vnum": vnum, "count": get_count(i), "name": item.GetItemName()})
+		return out
+
+	return {
+		"partner_vid": _trade[0].get("partner_vid"),
+		"partner_name": exchange.GetNameFromTarget() if hasattr(exchange, "GetNameFromTarget") else None,
+		"my_items": items(exchange.GetItemVnumFromSelf, exchange.GetItemCountFromSelf),
+		"their_items": items(exchange.GetItemVnumFromTarget, exchange.GetItemCountFromTarget),
+		"my_gold": exchange.GetElkFromSelf(), "their_gold": exchange.GetElkFromTarget(),
+		"my_accepted": bool(exchange.GetAcceptFromSelf()), "their_accepted": bool(exchange.GetAcceptFromTarget()),
+	}
+
+
+def cmd_get_party(a):
+	_need_game()
+	if not _party["members"]:
+		return {"in_party": False, "members": []}
+	my_pid = player.GetPlayerID() if hasattr(player, "GetPlayerID") else None
+	leader_name = _party["members"].get(_party["leader_pid"])
+	leader_vid = None
+	for e in _entities():
+		if e["type"] == "pc" and e["name"] == leader_name:
+			leader_vid = e["vid"]
+	if leader_name == player.GetName():
+		leader_vid = player.GetMainCharacterIndex()
+	return {"in_party": True, "leader_vid": leader_vid, "leader_name": leader_name,
+	        "is_leader": my_pid is not None and my_pid == _party["leader_pid"],
+	        "members": [{"name": n} for n in _party["members"].values()]}
 
 
 def cmd_get_quest_state(a):
@@ -423,6 +509,10 @@ def cmd_close_window(a):
 	elif a["name"] == "shop" and _shop[0]:
 		net.SendShopEndPacket()
 		_shop[0] = None
+	elif a["name"] == "trade" and _trade[0]:
+		net.SendExchangeExitPacket()
+	elif a["name"] == "party_invite" and _party_invite[0]:
+		return cmd_party_answer({"accept": False})
 	return {}
 
 
@@ -450,6 +540,77 @@ def cmd_send_chat(a):
 def cmd_respawn(a):
 	_need_game()
 	net.SendChatPacket("/restart_here" if a.get("here") else "/restart_town")
+	return {}
+
+
+def cmd_trade_request(a):
+	_need_game()
+	_trade[0] = {"partner_vid": int(a["vid"])}   # pencere StartExchange kancasıyla açılır
+	net.SendExchangeStartPacket(int(a["vid"]))
+	return {}
+
+
+def _need_trade():
+	if not _trade[0]:
+		raise QaError("NO_TRADE", "Acik ticaret yok")
+
+
+def cmd_trade_add_item(a):
+	_need_trade()
+	used = len(_trade_view()["my_items"])
+	net.SendExchangeItemAddPacket(int(a["slot"]), used)   # (envanter slotu, ticaret penceresi slotu)
+	return {}
+
+
+def cmd_trade_set_gold(a):
+	_need_trade()
+	if int(a["amount"]) > player.GetElk():
+		raise QaError("NOT_ENOUGH_GOLD", "Yetersiz yang")
+	net.SendExchangeElkAddPacket(int(a["amount"]))
+	return {}
+
+
+def cmd_trade_accept(a):
+	_need_trade()
+	net.SendExchangeAcceptPacket()
+	return {"completed": None}   # sonuç pencerenin kapanması / sunucu TRADE_COMPLETE olayı ile anlaşılır
+
+
+def cmd_trade_cancel(a):
+	_need_trade()
+	net.SendExchangeExitPacket()
+	return {}
+
+
+def cmd_party_invite(a):
+	_need_game()
+	net.SendPartyInvitePacket(int(a["vid"]))
+	return {}
+
+
+def cmd_party_answer(a):
+	inv = _party_invite[0]
+	if not inv:
+		raise QaError("NO_INVITE", "Bekleyen grup daveti yok")
+	_party_invite[0] = None
+	net.SendPartyInviteAnswerPacket(inv["leader_vid"], 1 if a.get("accept", True) else 0)
+	return {"joined": None}
+
+
+def cmd_party_leave(a):
+	if not _party["members"]:
+		raise QaError("NOT_IN_PARTY", "Grupta degilsin")
+	net.SendPartyExitPacket()
+	return {}
+
+
+def cmd_party_kick(a):
+	vid = int(a["vid"])
+	name = [e["name"] for e in _entities() if e["vid"] == vid]
+	pids = [pid for pid, n in _party["members"].items() if name and n == name[0]]
+	if not pids:
+		raise QaError("NOT_MEMBER", "Bu oyuncu grupta degil")
+	net.SendPartyRemovePacket(pids[0])
 	return {}
 
 

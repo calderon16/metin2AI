@@ -23,6 +23,8 @@ class BridgeConfig:
     host: str = "127.0.0.1"
     port: int = 47800
     timeout_s: float = 15.0
+    # Çoklu ajan (tcp): hesap -> QA client portu. Tanımsızsa port + ajan sırası kullanılır.
+    agent_ports: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

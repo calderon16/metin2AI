@@ -36,10 +36,12 @@ def summarize(report: dict[str, Any]) -> str:
     f = report.get("failure")
     if not f:
         return base
+    who = f"{f['agent']}: " if f.get("agent") else ""
     if f.get("step") is not None:
-        where = f"adım {f['step']} ({f.get('action')})"
+        where = f"adım {f['step']} ({who}{f.get('action')})"
     else:
         where = "örtük oracle kontrolü" if f.get("kind") == "oracle" else "final assert"
+        where += f" ({who.rstrip(': ')})" if who else ""
     extra = f" (+{len(report['failures']) - 1} hata daha)" if len(report["failures"]) > 1 else ""
     return f"{base}: {where} — {f.get('name')}: {f.get('message') or ''} " \
            f"beklenen={f.get('expected')} gerçekleşen={f.get('actual')}{extra}"

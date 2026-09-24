@@ -1,0 +1,40 @@
+name: party_exp_share
+description: >
+  A, B'yi gruba davet eder; B kabul eder. A bir Yaban Köpeği keser — 20 exp iki üyeye eşit
+  paylaşılmalı (10/10). Sonra B ayrılır ve 2 kişilik grup dağılır.
+tags: [party, multi-agent, combat, exp]
+covers: ["party*.cpp", "party*.h", "uiParty.py"]
+agents:
+  A: {account: AI_QA_001}
+  B: {account: AI_QA_002}
+steps:
+  - party_invite: {agent: B}
+    agent: A
+  - party_accept:
+    agent: B
+    expect:
+      - party: {in_party: true, size: 2, leader: A}
+        agent: B
+      - party: {is_leader: true}
+        agent: A
+  - walk_to: {x: 7600, y: 7600}
+    agent: B
+  - walk_to: {x: 7800, y: 7800}
+    agent: A
+  - kill_monster: {vnum: 101, count: 1}
+    agent: A
+    expect:
+      - player: {field: exp, delta: 10}
+        agent: A
+      - player: {field: exp, delta: 10}
+        agent: B
+      - server_event: {name: PARTY_EXP, count: 1}
+  - party_leave:
+    agent: B
+    expect:
+      - party: {in_party: false}
+        agent: A
+assert:
+  - party: {in_party: false}
+    agent: B
+  - server_event: {name: PARTY_DISBAND, count: 1}

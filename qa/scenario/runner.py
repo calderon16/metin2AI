@@ -11,6 +11,7 @@ tarafından kullanılır.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,12 @@ from ..bridge.client import Bridge
 from ..bridge.protocol import ActionError, BridgeError
 from ..config import QaConfig
 from ..engine.behaviours import login
-from ..engine.executor import BehaviourError, GameContext, execute_step
+from ..engine.executor import BehaviourError, GameContext, Trace, execute_step
 from ..engine.rng import QaRandom, new_seed
-from ..oracle.assertions import AssertionResult, Observation, evaluate, take_snapshot
+from ..oracle.assertions import GROUP_ASSERTIONS, AssertionResult, Observation, evaluate, take_snapshot
 from ..oracle.signals import BridgeEventSource, EventSource, FileEventSource, LogFileSource, ServerSignals
 from ..session import BridgeFactory
+from ..sim.world import SimWorld
 from ..store.artifacts import RunArtifacts
 from ..store.db import Store, utcnow
 from ..store.report import git_info, summarize
@@ -61,19 +63,44 @@ def send_qa_command(ctx: GameContext, command: str) -> str:
         ctx.wait(100)
 
 
+@dataclass
+class Agent:
+    """Run'daki bir oyuncu: kendi bridge'i (istemcisi), bağlamı ve başlangıç görüntüsü."""
+    name: str                     # tek ajanlı senaryoda ""
+    account: str
+    character: str
+    index: int = 0
+    bridge: Bridge | None = None
+    ctx: GameContext | None = None
+    baseline: dict[str, Any] | None = None
+
+
 class RunSession:
     def __init__(self, cfg: QaConfig, store: Store, factory: BridgeFactory, *, scenario: str, mode: str,
                  seed: int | None, account: str | None = None, character: str | None = None,
                  scenario_text: str | None = None, faults: list[str] | None = None,
-                 replay_of: str | None = None):
+                 replay_of: str | None = None, agents: dict[str, Any] | None = None):
         cfg.check_environment()
-        self.cfg, self.store, self.factory = cfg, store, factory
+        self.cfg, self.store = cfg, store
+        # Sim modunda tüm ajanlar aynı dünyayı paylaşmalı: run'a özel dünya
+        if factory.is_sim and factory.world is None:
+            factory = BridgeFactory(cfg, SimWorld(password=cfg.accounts.password))
+        self.factory = factory
         self.scenario, self.mode = scenario, mode
         self.seed = seed if seed is not None else (cfg.default_seed if cfg.default_seed is not None else new_seed())
-        self.account = account or cfg.accounts.default_account
-        cfg.check_account(self.account)
-        self.character = character or self.account
-        cfg.check_account(self.character)
+        if not agents:
+            agents = {"": {"account": account, "character": character}}
+        self.agents: dict[str, Agent] = {}
+        for i, (name, spec) in enumerate(agents.items()):
+            spec = spec if isinstance(spec, dict) else spec.model_dump()
+            acc = spec.get("account") or cfg.accounts.default_account
+            char = spec.get("character") or acc
+            cfg.check_account(acc)
+            cfg.check_account(char)
+            self.agents[name] = Agent(name, acc, char, i)
+        self.primary = next(iter(self.agents.values()))
+        self.account, self.character = self.primary.account, self.primary.character
+        self.multi = len(self.agents) > 1 or self.primary.name != ""
         self.faults = list(dict.fromkeys((faults or []) + cfg.sim.faults))
         self.scenario_text = scenario_text
         self.build = git_info(cfg.resolve(cfg.source_repo))
@@ -84,10 +111,8 @@ class RunSession:
         if scenario_text:
             self.artifacts.write_text("scenario.yaml", scenario_text)
         self.started_at = utcnow()
-        self.bridge: Bridge | None = None
-        self.ctx: GameContext | None = None
+        self.trace = Trace()
         self.signals: ServerSignals | None = None
-        self.baseline: dict[str, Any] | None = None
         self.steps: list[dict[str, Any]] = []
         self.failures: list[dict[str, Any]] = []
         self.assertions: list[dict[str, Any]] = []
@@ -96,23 +121,63 @@ class RunSession:
         self.finished = False
         self.report: dict[str, Any] | None = None
 
+    # Tek ajanlı kullanım (keşif modu vb.) için birincil ajan kısayolları
+    @property
+    def ctx(self) -> GameContext | None:
+        return self.primary.ctx
+
+    @property
+    def bridge(self) -> Bridge | None:
+        return self.primary.bridge
+
+    @property
+    def baseline(self) -> dict[str, Any] | None:
+        return self.primary.baseline
+
+    def agent(self, name: str | None) -> Agent:
+        if name is None:
+            return self.primary
+        if name not in self.agents:
+            raise BehaviourError("UNKNOWN_AGENT", f"Ajan bulunamadı: {name}")
+        return self.agents[name]
+
+    def _contexts(self) -> list[GameContext]:
+        return [a.ctx for a in self.agents.values() if a.ctx is not None]
+
+    def _set_step(self, step: int | None) -> None:
+        for c in self._contexts():
+            c.step = step
+
     # ------------------------------------------------------------------ başlangıç
     def start(self) -> None:
-        """Bağlan, giriş yap. Hata durumunda failure/error kaydeder ve False durumuna geçer."""
-        self.bridge = self.factory.open()
-        info = self.bridge.connect()
-        caps = set(info.get("capabilities", []))
+        """Tüm ajanlar için bağlan ve giriş yap."""
+        for a in self.agents.values():
+            a.bridge = self.factory.open(a.account, a.index)
+            a.bridge.connect()
+        caps = self.primary.bridge.capabilities
         if "sim_control" in caps:
-            self.bridge.call("sim_reset", seed=self.seed, faults=self.faults)
-        rng = QaRandom(self.seed)
-        self.ctx = GameContext(self.bridge, rng, account=self.account, password=self.cfg.accounts.password,
-                               character=self.character, screenshot_sink=self.artifacts.save_screenshot)
-        self.ctx.note("run_start", run_id=self.run_id, scenario=self.scenario, seed=self.seed)
-        self.signals = ServerSignals(self._event_sources(caps), character=self.character)
+            self.primary.bridge.call("sim_reset", seed=self.seed, faults=self.faults)
+        root_rng = QaRandom(self.seed)
+        for a in self.agents.values():
+            rng = root_rng if a is self.primary else root_rng.fork(a.name)
+            sink = self.artifacts.save_screenshot
+            if self.multi:
+                sink = (lambda n: lambda label, raw, ext: self.artifacts.save_screenshot(f"{n}_{label}", raw, ext))(a.name)
+            a.ctx = GameContext(a.bridge, rng, trace=self.trace, account=a.account,
+                                password=self.cfg.accounts.password, character=a.character,
+                                screenshot_sink=sink, agent=a.name or None)
+        peers = {a.name: a.ctx for a in self.agents.values() if a.name}
+        for a in self.agents.values():
+            a.ctx.peers = peers
+        self.primary.ctx.note("run_start", run_id=self.run_id, scenario=self.scenario, seed=self.seed,
+                              agents={a.name: a.account for a in self.agents.values()} if self.multi else None)
+        self.signals = ServerSignals(self._event_sources(caps),
+                                     characters={a.character for a in self.agents.values()})
         self.signals.mark()
-        self._t0 = self.ctx.now()
-        self.ctx.step = 0
-        login(self.ctx)
+        self._t0 = self.primary.ctx.now()
+        self._set_step(0)
+        for a in self.agents.values():
+            login(a.ctx)
 
     def _event_sources(self, caps: set[str]) -> list[EventSource]:
         sc = self.cfg.server
@@ -120,38 +185,43 @@ class RunSession:
         if sc.events_file:
             sources.append(FileEventSource(self.cfg.resolve(sc.events_file)))
         elif "server_events" in caps:
-            sources.append(BridgeEventSource(self.bridge))
+            sources.append(BridgeEventSource(self.primary.bridge))
         for name, path in sc.log_files.items():
             sources.append(LogFileSource(name, self.cfg.resolve(path), sc.error_patterns))
         return sources
 
-    def qa_command(self, command: str) -> str:
-        return send_qa_command(self.ctx, command)
+    def qa_command(self, command: str, agent: str | None = None) -> str:
+        return send_qa_command(self.agent(agent).ctx, command)
 
     def setup(self, ops: list[SetupOp], reset: bool = True) -> None:
-        self.ctx.step = 0
-        if reset:
-            self.qa_command("/qa reset")
-        for op in ops:
-            self.qa_command(op.to_command())
-        self.ctx.wait(300)
-        self.baseline = take_snapshot(self.ctx)
+        self._set_step(0)
+        for a in self.agents.values():
+            if reset:
+                send_qa_command(a.ctx, "/qa reset")
+            for op in ops:
+                if self.agent(op.agent) is a:
+                    send_qa_command(a.ctx, op.to_command())
+        self.primary.ctx.wait(300)
+        for a in self.agents.values():
+            a.baseline = take_snapshot(a.ctx)
+            a.ctx.note("baseline", state=a.baseline["state"])
         self.signals.poll()
-        self.ctx.note("baseline", state=self.baseline["state"])
 
     # ------------------------------------------------------------------ adımlar
     def run_step(self, step: Step, index: int) -> list[dict[str, Any]]:
-        ctx = self.ctx
-        ctx.step = index
+        a = self.agent(step.agent)
+        ctx = a.ctx
+        self._set_step(index)
+        who = {"agent": a.name} if a.name else {}
         rec: dict[str, Any] = {"index": index, "name": step.name, "args": step.args, "label": step.label,
-                               "t_start": ctx.now()}
+                               **who, "t_start": ctx.now()}
         ctx.note("step_start", name=step.name, args=step.args, label=step.label)
         fails: list[dict[str, Any]] = []
         try:
             result = execute_step(ctx, step.name, step.args)
             rec["result"] = _jsonable(result)
             if step.expect_error:
-                fails.append({"step": index, "action": step.name, "label": step.label, "kind": "assertion",
+                fails.append({"step": index, "action": step.name, **who, "label": step.label, "kind": "assertion",
                               "name": "expect_error", "expected": {"error": step.expect_error},
                               "actual": {"error": None, "result": rec["result"]},
                               "message": f"Adımın {step.expect_error} ile reddedilmesi bekleniyordu ama başarılı oldu"})
@@ -161,8 +231,8 @@ class RunSession:
                 rec["result"] = {"rejected": step.expect_error}
             else:
                 rec["error"] = f"{e.code}: {e.message}"
-                fails.append({"step": index, "action": step.name, "label": step.label, "kind": "action_error",
-                              "name": e.code,
+                fails.append({"step": index, "action": step.name, **who, "label": step.label,
+                              "kind": "action_error", "name": e.code,
                               "expected": {"error": step.expect_error} if step.expect_error else {"step_succeeds": True},
                               "actual": {"error": e.code, "details": _jsonable(e.details, 1000)} if e.details
                               else {"error": e.code},
@@ -179,13 +249,22 @@ class RunSession:
         return fails
 
     def check(self, specs: list[AssertSpec], step: int | None = None, action: str | None = None) -> list[dict[str, Any]]:
-        obs = Observation(self.ctx, self.baseline or take_snapshot(self.ctx), self.signals)
+        group: dict[str, Observation] = {}
+        for a in self.agents.values():
+            group[a.name] = Observation(a.ctx, a.baseline or take_snapshot(a.ctx), self.signals)
+        for o in group.values():
+            o.group = group
         fails = []
         for spec in specs:
-            r = evaluate(obs, spec.name, spec.args)
-            self._record_assertion(r, step)
+            a = self.agent(spec.agent)
+            r = evaluate(group[a.name], spec.name, spec.args)
+            label = "" if spec.name in GROUP_ASSERTIONS and spec.agent is None else a.name
+            self._record_assertion(r, step, label)
             if not r.passed:
-                fails.append(self._assert_failure(r, step, action))
+                f = self._assert_failure(r, step, action)
+                if label:
+                    f["agent"] = label
+                fails.append(f)
         return fails
 
     def implicit_checks(self, opts: OracleOptions) -> list[dict[str, Any]]:
@@ -200,12 +279,15 @@ class RunSession:
         self.failures += fails
         return fails
 
-    def _record_assertion(self, r: AssertionResult, step: int | None) -> None:
+    def _record_assertion(self, r: AssertionResult, step: int | None, agent: str = "") -> None:
         d = r.to_dict()
         d["step"] = step
+        if agent:
+            d["agent"] = agent
         d["actual"] = _jsonable(d["actual"])
         self.assertions.append(d)
-        self.ctx.note("assert", name=r.name, passed=r.passed)
+        (self.agents[agent].ctx if agent in self.agents else self.primary.ctx).note(
+            "assert", name=r.name, passed=r.passed)
 
     @staticmethod
     def _assert_failure(r: AssertionResult, step: int | None, action: str | None) -> dict[str, Any]:
@@ -213,25 +295,22 @@ class RunSession:
                 "expected": r.expected, "actual": _jsonable(r.actual), "message": r.message or "ASSERTION FAILED"}
 
     def _failure_screenshot(self, index: int) -> None:
-        try:
-            self.ctx.screenshot(f"failure_step_{index}")
-        except (ActionError, BridgeError, OSError):
-            pass
+        for c in self._contexts():
+            try:
+                c.screenshot(f"failure_step_{index}")
+            except (ActionError, BridgeError, OSError):
+                pass
 
     def elapsed(self) -> int:
-        return self.ctx.now() - self._t0 if self.ctx else 0
+        return self.primary.ctx.now() - self._t0 if self.primary.ctx else 0
 
     # ------------------------------------------------------------------ bitiş
     def fail_infra(self, message: str) -> None:
         self.error = message
 
-    def finish(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self.finished:
-            return self.report
-        self.finished = True
-        ctx = self.ctx
-        client_log = ""
-        if ctx is not None and self.bridge is not None:
+    def _shutdown_agent(self, a: Agent) -> str:
+        ctx, log = a.ctx, ""
+        if ctx is not None and a.bridge is not None:
             try:
                 if ctx.state().get("in_game"):
                     ctx.step = None
@@ -239,16 +318,28 @@ class RunSession:
             except (ActionError, BridgeError):
                 pass
             try:
-                client_log = "\n".join(f"[{m['t']}] {m['text']}" for m in ctx.query("get_client_log", since=0))
+                log = "\n".join(f"[{m['t']}] {m['text']}" for m in ctx.query("get_client_log", since=0))
             except (ActionError, BridgeError):
-                client_log = "(istemci log komutunu desteklemiyor)"
-            try:
-                if self.signals:
-                    self.signals.poll()
-            except (ActionError, BridgeError, OSError):
-                pass
-        if self.bridge is not None:
-            self.bridge.close()
+                log = "(istemci log komutunu desteklemiyor)"
+        return log
+
+    def finish(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.finished:
+            return self.report
+        self.finished = True
+        logs = {a.name: self._shutdown_agent(a) for a in self.agents.values()}
+        try:
+            if self.signals:
+                self.signals.poll()
+        except (ActionError, BridgeError, OSError):
+            pass
+        for a in self.agents.values():
+            if a.bridge is not None:
+                a.bridge.close()
+        if self.multi:
+            client_log = "\n\n".join(f"== {n} ({self.agents[n].account}) ==\n{l}" for n, l in logs.items())
+        else:
+            client_log = logs[self.primary.name]
 
         if self.error:
             result = "ERROR"
@@ -259,10 +350,11 @@ class RunSession:
 
         a = self.artifacts
         evidence: dict[str, Any] = {"report": "report.json"}
-        if ctx is not None:
-            ctx.trace.write_jsonl(a.path("trace.jsonl"))
+        started = self.primary.ctx is not None
+        if started:
+            self.trace.write_jsonl(a.path("trace.jsonl"))
             evidence["action_trace"] = "trace.jsonl"
-            evidence["action_trace_text"] = a.write_text("trace.txt", ctx.trace.format_text())
+            evidence["action_trace_text"] = a.write_text("trace.txt", self.trace.format_text())
         evidence["client_log"] = a.write_text("client.log", client_log)
         server_log = ""
         if self.signals:
@@ -285,9 +377,10 @@ class RunSession:
             "seed": self.seed,
             "player": self.character,
             "account": self.account,
+            "agents": {x.name: x.account for x in self.agents.values()} if self.multi else None,
             "replay_of": self.replay_of,
             "build": {**self.build, "env": self.cfg.env},
-            "client": self.bridge.info if self.bridge else None,
+            "client": self.primary.bridge.info if self.primary.bridge else None,
             "sim_faults": self.faults if self.factory.is_sim else None,
             "started_at": self.started_at,
             "finished_at": utcnow(),
@@ -302,7 +395,7 @@ class RunSession:
                 "qa_assert_failures": len(self.signals.assert_failures) if self.signals else None,
                 "events": len(self.signals.events) if self.signals else None,
             },
-            "trace_digest": ctx.trace.digest() if ctx else None,
+            "trace_digest": self.trace.digest() if started else None,
             "evidence": evidence,
         }
         if extra:
@@ -324,7 +417,8 @@ class ScenarioRunner:
             replay_of: str | None = None, mode: str = "scenario") -> dict[str, Any]:
         s = RunSession(self.cfg, self.store, self.factory, scenario=sc.name, mode=mode,
                        seed=seed if seed is not None else sc.seed, account=sc.account, character=sc.character,
-                       scenario_text=scenario_text, faults=sc.sim_faults, replay_of=replay_of)
+                       scenario_text=scenario_text, faults=sc.sim_faults, replay_of=replay_of,
+                       agents=sc.agents or None)
         try:
             try:
                 s.start()
@@ -354,9 +448,9 @@ class ScenarioRunner:
                                         "status": "skipped"})
                     break
             else:
-                s.ctx.step = None
+                s._set_step(None)
                 s.failures += s.check(sc.asserts)
-            s.ctx.step = None
+            s._set_step(None)
             s.implicit_checks(sc.oracle)
         except BridgeError as e:
             s.fail_infra(f"Bridge hatası: {e}")

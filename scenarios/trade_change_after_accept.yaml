@@ -1,0 +1,47 @@
+name: trade_change_after_accept
+description: >
+  Dolandırıcılık edge-case'i — A onayladıktan sonra B teklifini 300 yangdan 1 yanga düşürür.
+  A'nın onayı sıfırlanmalı; B onaylasa bile takas gerçekleşmemeli.
+tags: [trade, multi-agent, edge-case, security]
+covers: ["exchange.cpp", "exchange.h"]
+agents:
+  A: {account: AI_QA_001}
+  B: {account: AI_QA_002}
+setup:
+  - give_item: {vnum: 10, count: 1}
+    agent: A
+  - set_gold: 500
+    agent: B
+steps:
+  - trade_with: {agent: B}
+    agent: A
+  - trade_add_item: {vnum: 10}
+    agent: A
+  - trade_set_gold: 300
+    agent: B
+  - trade_accept:
+    agent: A
+    expect:
+      - trade: {their_accepted: true}
+        agent: B
+  - trade_set_gold: 1
+    agent: B
+    expect:
+      - trade: {open: true, my_accepted: false}
+        agent: A
+  - trade_accept:
+    agent: B
+    expect:
+      - trade: {open: true, my_accepted: false, their_accepted: true}
+        agent: A
+  - trade_cancel:
+    agent: A
+assert:
+  - inventory_contains: {vnum: 10, count: 1, exact: true}
+    agent: A
+  - gold: {equals: 0}
+    agent: A
+  - gold: {equals: 500}
+    agent: B
+  - conservation
+  - server_event: {name: TRADE_COMPLETE, count: 0}
