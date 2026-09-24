@@ -97,6 +97,7 @@ Claude Desktop için aynı komutu (`.venv/bin/python -m qa.mcp_server`, `QA_CONF
 | `replay_failure` | aynı seed ile tekrar → `REPRODUCED k/N` |
 | `get_player_state`, `reset_test_account` | canlı durum, QA hesabı sıfırlama |
 | `explore_start`, `explore_step`, `explore_check`, `explore_observe`, `explore_finish` | serbest keşif; bitince senaryo olarak kaydedilebilir |
+| `explore_autonomous` | otonom keşif ajanı (Gemini) — hedefi ver, kendi başına test etsin |
 
 Kapalı döngü örneği:
 
@@ -173,6 +174,38 @@ party_invite, party_accept, party_decline, party_leave, party_kick`. Assertion'l
 (onaydan sonra teklif değiştirme dolandırıcılığı), `trade_inventory_full`, `party_exp_share`.
 Gerçek client'ta her ajan ayrı `Metin2_QA.exe` örneğidir (`[bridge.agent_ports]`).
 
+## Otonom keşif ajanı (Gemini)
+
+Hedefi verirsin, ajan oyunu kendi başına oynar, edge-case arar ve bulgularını raporlar:
+
+```bash
+export GEMINI_API_KEY=...            # Google AI Studio'dan; dosyaya yazılmaz
+export GEMINI_MODEL=gemini-2.5-flash # opsiyonel (qa.toml [explorer].model da olur)
+
+metin2-qa explore "Genel Mağaza'yı oyuncu gibi kullan; yetersiz yang ve dolu envanteri dene" \
+    --steps 40 --save-as auto_shop
+metin2-qa explore --goals explore/goals.yaml      # hazır hedef listesi
+```
+
+Nasıl çalışır:
+
+- Model behaviour'ları (`kill_monster`, `buy_item`, `talk_npc` ...) **tool** olarak görür (Gemini function
+  calling). Ayrıca `observe`, `check` (assertion), `report_finding` ve yalnızca ilk adımdan önce `qa_setup`.
+  Shell/SQL/dosya erişimi yoktur.
+- Her adımın sonucu modele döner: durum farkı, istemci olayları, yeni SYSERR/QA_ASSERT'ler, oracle hataları.
+- Bütçe: adım sayısı, tur sayısı, toplam token (`qa.toml [explorer]`). Uzun keşiflerde bağlam kayan pencereyle tutulur.
+- Çıktı: keşif raporu (`agent_summary`, `findings`, token kullanımı, `llm_transcript.jsonl`) ve `--save-as`
+  ile **regression senaryosu**. Senaryoya modelin hatalı çağrıları girmez; oracle'ın itiraz ettiği adımlar
+  girer. Böylece bulunan bug, düzeltilene kadar FAILED veren bir teste dönüşür. Senaryo üretilince aynı
+  seed ile bir kez doğrulama için çalıştırılır.
+- MCP'den: `explore_autonomous(goal, max_steps, save_as_scenario)`.
+- **Gece CI:** GitHub'da `GEMINI_API_KEY` secret'ı (ve istersen `GEMINI_MODEL` variable'ı) tanımlarsan
+  `explore/goals.yaml` her gece çalışır; rapor ve üretilen senaryolar artifact olarak yüklenir. Secret yoksa
+  iş atlanır.
+
+Model bağımsızdır: `qa/planner/llm.py` içindeki `LLMProvider` arayüzünü uygulayan başka bir sağlayıcı
+(ör. Claude) eklenebilir.
+
 ## Senaryo formatı
 
 ```yaml
@@ -229,7 +262,8 @@ qa/engine/     seed'li RNG, GameContext + trace, behaviour'lar
 qa/scenario/   YAML şema, yükleyici, runner
 qa/oracle/     assertion'lar, sunucu sinyalleri (QA_EVENT dosyası, log dosyaları)
 qa/store/      SQLite, artifact'ler, rapor
-qa/planner/    keşif (explore) modu
+qa/planner/    keşif modu, otonom ajan (autonomous.py), LLM sağlayıcıları (llm.py)
+explore/       otonom keşif hedefleri
 qa/build/      whitelist build/sunucu komutları
 qa/mcp_server.py, qa/cli.py, qa/service.py
 integration/   gerçek client/sunucu kodu + INTEGRATION.md
@@ -242,6 +276,6 @@ tests/         pytest (simülatöre karşı)
 ## Yol haritası
 
 Hazır: bridge, test runner, oracle, replay, MCP, keşif, değişikliğe göre seçim, CI, çoklu ajan
-(trade/party). Sıradakiler: otonom keşif ajanı (LLM API ile gece çalışan), guild/PvP/offline shop
+(trade/party), otonom keşif ajanı (Gemini). Sıradakiler: çoklu ajanlı otonom keşif, guild/PvP/offline shop
 senaryoları, eşzamanlı (race condition) çoklu ajan adımları, gcov ile coverage yönlendirmeli
 senaryo üretimi, görsel assertion'lar, QA client'ta kanal değiştirme.

@@ -114,6 +114,24 @@ class QaService:
                             "summary": rep["summary"]})
         return {"ok": all(r["result"] == "PASSED" for r in results), "ran": True, **sel, "results": results}
 
+    def explore_auto(self, goal: str, max_steps: int | None = None, save_as_scenario: str | None = None,
+                     setup: list[Any] | None = None, seed: int | None = None, account: str | None = None,
+                     model: str | None = None, provider: Any = None, validate: bool = True) -> dict[str, Any]:
+        """Otonom keşif: LLM (varsayılan Gemini) hedefe göre oyunu kendi başına test eder."""
+        from .planner.autonomous import AutoExplorer, ExploreBudget
+        from .planner.llm import make_provider
+
+        e = self.cfg.explorer
+        if provider is None:
+            provider = make_provider(e.provider, model or e.model, api_key_env=e.api_key_env,
+                                     temperature=e.temperature)
+        budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
+                               history_turns=e.history_turns)
+        out = AutoExplorer(self.cfg, self.store, provider, self.factory).run(
+            goal, budget=budget, account=account, seed=seed, setup=setup, save_as_scenario=save_as_scenario,
+            validate=validate)
+        return out.to_dict()
+
     def replay_failure(self, run_id: str, times: int = 3) -> dict[str, Any]:
         return replay_run(self.runner, run_id, times)
 

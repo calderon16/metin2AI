@@ -57,6 +57,16 @@ error_patterns = ["SYSERR", "Traceback", "QUEST_ERROR", "SQL error"]
 # syserr = "/usr/metin2/qa/channel1/core1/syserr"
 # syslog = "/usr/metin2/qa/channel1/core1/syslog"
 
+[explorer]
+# Otonom keşif ajanı. API anahtarı BURAYA YAZILMAZ: api_key_env'deki ortam değişkeninden okunur.
+provider = "gemini"
+# model = "gemini-2.5-flash"      # boşsa GEMINI_MODEL ortam değişkeni, o da yoksa gemini-2.5-flash
+api_key_env = "GEMINI_API_KEY"
+temperature = 0.4
+max_steps = 60                    # keşif başına oyuncu adımı bütçesi
+max_total_tokens = 2000000        # keşif başına token tavanı (maliyet sınırı)
+history_turns = 30                # bağlamda tutulan son tur sayısı
+
 [selection]
 # Değişikliğe göre test seçimi (metin2-qa affected / MCP run_affected).
 # Varsayılan kurallar klasik Metin2 dosya adlarını kapsar (qa/config.py DEFAULT_SELECTION_RULES);

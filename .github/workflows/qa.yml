@@ -107,3 +107,33 @@ jobs:
           name: qa-artifacts-nightly
           path: artifacts/
           retention-days: 30
+
+  explore:
+    name: gece — otonom keşif (Gemini)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e .
+      - name: Anahtar yoksa atla
+        if: env.GEMINI_API_KEY == ''
+        run: echo "GEMINI_API_KEY secret'ı tanımlı değil; otonom keşif atlandı." >> "$GITHUB_STEP_SUMMARY"
+      - name: Otonom keşif
+        if: env.GEMINI_API_KEY != ''
+        run: metin2-qa explore --goals explore/goals.yaml --summary-md "$GITHUB_STEP_SUMMARY"
+      - name: Kanıtlar ve üretilen senaryolar
+        if: always() && env.GEMINI_API_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-explore
+          path: |
+            artifacts/
+            scenarios/auto_*.yaml
+          retention-days: 30

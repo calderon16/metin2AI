@@ -127,7 +127,8 @@ class ExplorationManager:
             rep = rs.finish({"goal": goal})
             return {"run_id": rs.run_id, "ok": False, "error": rep["error"]}
         with self._lock:
-            self.sessions[rs.run_id] = {"rs": rs, "goal": goal, "setup": ops, "steps": [], "checks": []}
+            self.sessions[rs.run_id] = {"rs": rs, "goal": goal, "setup": ops, "steps": [], "status": [],
+                                        "checks": []}
         return {"run_id": rs.run_id, "ok": True, "seed": rs.seed, "account": rs.account,
                 "state": rs.baseline["state"], "inventory": rs.baseline["inventory"],
                 "nearby": rs.ctx.entities(radius=8000)[:30], "checklist": suggest_checklist(goal)}
@@ -146,6 +147,9 @@ class ExplorationManager:
         after = take_snapshot(rs.ctx)
         s["steps"].append(step)
         rec = rs.steps[-1]
+        # passed | assertion_failed (oyun yanlış davrandı → senaryoda kalmalı) | action_error (adım yürümedi)
+        s["status"].append("passed" if not fails else
+                           "action_error" if any(f["kind"] == "action_error" for f in fails) else "assertion_failed")
         return {
             "step": idx,
             "status": rec["status"],
@@ -167,9 +171,27 @@ class ExplorationManager:
         specs = [AssertSpec.parse(a) for a in asserts]
         fails = rs.check(specs, step=len(s["steps"]) or None)
         rs.failures += fails
-        s["checks"] += specs
+        # Kaydedilecek senaryoda kontrol, yapıldığı andaki adımın `expect`'i olur
+        if s["steps"]:
+            s["steps"][-1].expect.extend(specs)
+        else:
+            s["checks"] += specs
         results = rs.assertions[-len(specs):] if specs else []
         return {"passed": not fails, "results": results}
+
+    def setup_more(self, run_id: str, setup: list[Any]) -> dict[str, Any]:
+        """Ek hazırlık (/qa komutları) — yalnızca ilk oyuncu adımından önce."""
+        s = self._get(run_id)
+        if s["steps"]:
+            raise ValueError("Setup yalnızca ilk oyuncu adımından önce yapılabilir")
+        rs: RunSession = s["rs"]
+        ops = [SetupOp.parse(x) for x in setup]
+        for op in ops:
+            rs.qa_command(op.to_command())
+        rs.ctx.wait(300)
+        rs.primary.baseline = take_snapshot(rs.ctx)
+        s["setup"] += ops
+        return {"ok": True, "state": rs.baseline["state"], "inventory": rs.baseline["inventory"]}
 
     def observe(self, run_id: str) -> dict[str, Any]:
         rs: RunSession = self._get(run_id)["rs"]
@@ -178,7 +200,8 @@ class ExplorationManager:
                 "messages": rs.ctx.query("get_system_messages", since=0)[-10:]}
 
     def finish(self, run_id: str, findings: list[dict[str, Any]] | None = None,
-               save_as_scenario: str | None = None, overwrite: bool = False) -> dict[str, Any]:
+               save_as_scenario: str | None = None, overwrite: bool = False,
+               drop_errored_steps: bool = False, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             s = self.sessions.pop(run_id, None)
         if s is None:
@@ -197,10 +220,13 @@ class ExplorationManager:
         if save_as_scenario:
             sc = Scenario(name=save_as_scenario, description=f"Keşiften üretildi ({run_id}): {s['goal']}",
                           tags=["generated", "explore"], account=rs.account, seed=rs.seed,
-                          setup=s["setup"], steps=s["steps"], asserts=s["checks"])
+                          setup=s["setup"],
+                          steps=[st for st, stat in zip(s["steps"], s["status"])
+                                 if not drop_errored_steps or stat != "action_error"],
+                          asserts=s["checks"])
             text = dump_scenario(sc)
             saved = str(save_scenario(self.cfg.scenarios_path, save_as_scenario, text, overwrite))
-        rep = rs.finish({"goal": s["goal"], "findings": findings, "saved_scenario": saved})
+        rep = rs.finish({"goal": s["goal"], "findings": findings, "saved_scenario": saved, **(extra or {})})
         return {"run_id": run_id, "result": rep["result"], "summary": rep["summary"], "saved_scenario": saved,
                 "failures": rep["failures"]}
 

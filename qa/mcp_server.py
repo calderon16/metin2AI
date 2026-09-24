@@ -216,6 +216,16 @@ def explore_finish(run_id: str, findings: list[dict[str, Any]] | None = None,
     return svc().explorer.finish(run_id, findings, save_as_scenario, overwrite)
 
 
+@mcp.tool()
+def explore_autonomous(goal: str, max_steps: int | None = None, save_as_scenario: str | None = None,
+                       setup: list[Any] | None = None, seed: int | None = None) -> dict[str, Any]:
+    """Otonom keşif ajanını (qa.toml [explorer], varsayılan Gemini) çalıştırır: hedefe göre oyunu kendi
+    başına oynar, edge-case arar, bulguları raporlar. save_as_scenario verilirse yürütülen başarılı adımlar
+    + kontroller regression senaryosu olarak kaydedilir ve bir kez doğrulama için çalıştırılır.
+    Uzun sürebilir (adım sayısıyla orantılı). API anahtarı ortam değişkeninde olmalı (GEMINI_API_KEY)."""
+    return svc().explore_auto(goal, max_steps, save_as_scenario, setup, seed)
+
+
 def main() -> None:
     mcp.run()
 

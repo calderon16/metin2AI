@@ -1,0 +1,23 @@
+# Otonom keşif hedefleri — gece CI'da ve `metin2-qa explore --goals explore/goals.yaml` ile çalışır.
+# save_as: keşiften üretilecek regression senaryosunun adı (scenarios/ altına yazılır, gözden geçirip commit'leyin).
+- name: shop_edge_cases
+  goal: >
+    Genel Mağaza (NPC 9001) alım-satım sistemini normal bir oyuncu gibi kullan. Yetersiz yang, sınır
+    değerler, aynı itemi art arda alıp satma, dolu envanter ve pencereyi kapatıp açma durumlarını dene.
+    Yangın eksiye düşmesi, item kaybı ya da bedava item gibi mantık hatalarını ara.
+  steps: 40
+  save_as: auto_shop_edge_cases
+
+- name: quest_dog_hunt_edge_cases
+  goal: >
+    Köy Muhafızı'nın (NPC 20016) Köpek Avı görevini test et. İlerleme sayacının her köpekte tam 1 arttığını,
+    ödülün yalnızca bir kez verildiğini, görev ortasında ölüp dirilme ve yeniden bağlanmanın ilerlemeyi
+    bozmadığını doğrula.
+  steps: 50
+  save_as: auto_quest_dog_hunt
+
+- name: inventory_combat
+  goal: >
+    Yaban Köpeği (101) ve Kurt (102) keserek drop topla, iksir kullan, ekipman giy/çıkar. HP'nin max_hp'yi
+    aşmaması, iksirin doğru miktarda iyileştirmesi, drop'ların envantere doğru girmesi gibi kuralları kontrol et.
+  steps: 50

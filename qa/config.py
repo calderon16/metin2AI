@@ -90,6 +90,19 @@ class SelectionConfig:
 
 
 @dataclass
+class ExplorerConfig:
+    """Otonom keşif ajanı (LLM). API anahtarı dosyada DEĞİL, api_key_env'deki ortam değişkeninde."""
+    provider: str = "gemini"
+    # Boşsa GEMINI_MODEL ortam değişkeni, o da yoksa sağlayıcının varsayılanı
+    model: str | None = None
+    api_key_env: str = "GEMINI_API_KEY"
+    temperature: float = 0.4
+    max_steps: int = 60
+    max_total_tokens: int | None = 2_000_000
+    history_turns: int = 30
+
+
+@dataclass
 class AccountsConfig:
     allowed_prefix: str = "AI_QA_"
     default_account: str = "AI_QA_001"
@@ -113,6 +126,7 @@ class QaConfig:
     build: BuildConfig = field(default_factory=BuildConfig)
     accounts: AccountsConfig = field(default_factory=AccountsConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
+    explorer: ExplorerConfig = field(default_factory=ExplorerConfig)
 
     def resolve(self, p: Path | str) -> Path:
         p = Path(p)
@@ -175,6 +189,7 @@ def load_config(path: Path | str | None = None) -> QaConfig:
             "build": cfg.build,
             "accounts": cfg.accounts,
             "selection": cfg.selection,
+            "explorer": cfg.explorer,
         }
         for key, value in data.items():
             if key in sections:

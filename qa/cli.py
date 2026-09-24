@@ -4,6 +4,8 @@
     metin2-qa run kill_mob_pickup --seed 846219
     metin2-qa run --all [--tag smoke]       # hata varsa çıkış kodu 1
     metin2-qa affected --base origin/main --run   # sadece değişikliğin etkilediği senaryolar
+    metin2-qa explore "Dükkanı test et" --steps 40 --save-as auto_shop   # otonom keşif (GEMINI_API_KEY)
+    metin2-qa explore --goals explore/goals.yaml
     metin2-qa replay QA-2026-00012 --times 5
     metin2-qa runs --status FAILED
     metin2-qa show QA-2026-00012 [--trace]
@@ -33,6 +35,40 @@ def _write_summary(path: str | None, results: list[dict], title: str, selection:
         f.write(markdown_summary(results, title, selection) + "\n")
 
 
+def _explore(s, a, ap) -> int:
+    import yaml
+
+    if a.goals:
+        goals = yaml.safe_load(open(a.goals, encoding="utf-8")) or []
+        if a.only:
+            goals = [g for g in goals if g.get("name") == a.only]
+    elif a.goal:
+        goals = [{"name": "cli", "goal": a.goal, "save_as": a.save_as,
+                  "setup": yaml.safe_load(a.setup) if a.setup else None}]
+    else:
+        ap.error("hedef metni veya --goals gerekli")
+    serious = {"critical", "major", "bug"}
+    rows, bad = [], False
+    for g in goals:
+        print(f"== {g.get('name')}: {g['goal'].strip()[:100]}")
+        out = s.explore_auto(g["goal"], a.steps or g.get("steps"), g.get("save_as"), g.get("setup"), a.seed,
+                             model=a.model)
+        print(f"   {out['summary']}")
+        print(f"   durma: {out['stop_reason']} · adım {out['steps']} · tur {out['turns']} · "
+              f"token {out['usage'].get('total_tokens', 0)}")
+        if out.get("agent_summary"):
+            print(f"   ajan: {out['agent_summary']}")
+        for f in out["findings"]:
+            print(f"   [{f.get('severity')}] {f.get('title')}: {f.get('description')}")
+            bad |= f.get("severity") in serious
+        if out.get("saved_scenario"):
+            print(f"   senaryo: {out['saved_scenario']} → doğrulama {(out.get('validation') or {}).get('result')}")
+        rows.append({"scenario": f"explore:{g.get('name')}", "run_id": out["run_id"], "result": out["result"],
+                     "summary": f"{len(out['findings'])} bulgu · {out['stop_reason']} · {out.get('agent_summary', '')}"})
+    _write_summary(a.summary_md, rows, "Metin2 QA — otonom keşif")
+    return 1 if a.fail_on_findings and bad else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="metin2-qa", description="Metin2 AI QA Player")
     ap.add_argument("--config", help="qa.toml yolu (varsayılan: QA_CONFIG / ./qa.local.toml / ./qa.toml)")
@@ -51,6 +87,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run", action="store_true")
     p.add_argument("--seed", type=int)
     p.add_argument("--summary-md")
+    p = sub.add_parser("explore", help="Otonom keşif ajanı (LLM, varsayılan Gemini)")
+    p.add_argument("goal", nargs="?", help="Test hedefi (serbest metin)")
+    p.add_argument("--goals", help="Hedef listesi YAML (ör. explore/goals.yaml)")
+    p.add_argument("--only", help="--goals içinden yalnızca bu isim")
+    p.add_argument("--steps", type=int, help="Oyuncu adımı bütçesi")
+    p.add_argument("--save-as", help="Üretilecek regression senaryosunun adı")
+    p.add_argument("--setup", help="YAML liste, ör. '- set_gold: 1000'")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--model", help="LLM modeli (varsayılan: qa.toml [explorer].model / GEMINI_MODEL)")
+    p.add_argument("--summary-md")
+    p.add_argument("--fail-on-findings", action="store_true", help="bug/major/critical bulguda çıkış kodu 1")
     p = sub.add_parser("replay", help="Run'ı aynı seed ile tekrar oynat")
     p.add_argument("run_id")
     p.add_argument("--times", type=int, default=3)
@@ -112,6 +159,14 @@ def main(argv: list[str] | None = None) -> int:
         if res.get("ran"):
             _write_summary(a.summary_md, res["results"], "Metin2 QA — değişikliğe göre seçilen testler", res)
         return 0 if res["ok"] else 1
+    if a.cmd == "explore":
+        from .planner.llm import LLMError
+
+        try:
+            return _explore(s, a, ap)
+        except LLMError as e:
+            print(f"Hata: {e}", file=sys.stderr)
+            return 2
     if a.cmd == "replay":
         res = s.replay_failure(a.run_id, a.times)
         print(f"{res['verdict']} (deterministic_trace={res['deterministic_trace']})")

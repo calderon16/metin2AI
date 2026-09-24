@@ -19,3 +19,8 @@ Metin2 kaynağında değişiklik yaptıktan sonra: `build` → `run_affected` (d
 FAILED ise `get_test_result`, `get_trace`, `get_server_logs`, `get_screenshot` ile kök nedeni bul →
 düzelt → tekrar çalıştır → `replay_failure(eski_run)` ile düzeltmeyi doğrula. Yeni bir sistem
 geliştirdiğinde onun senaryosunu da `write_scenario` ile ekle.
+
+## Otonom keşif (Gemini)
+`metin2-qa explore` / MCP `explore_autonomous`. Anahtar `GEMINI_API_KEY` ortam değişkeninde; asla dosyaya
+veya commit'e yazma. Testler gerçek API çağırmaz (`ScriptedProvider` ve yerel sahte HTTP sunucusu).
+Üretilen `scenarios/auto_*.yaml` dosyalarını commit'lemeden önce gözden geçir.
