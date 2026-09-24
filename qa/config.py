@@ -52,6 +52,41 @@ class BuildConfig:
     timeout_s: int = 3600
 
 
+# Kaynak dosya kalıbı -> çalıştırılacak senaryo hedefleri.
+# Kalıpta "/" yoksa dosya adına, varsa tam yola (fnmatch, * dizinleri de kapsar) bakılır.
+# Hedef: etiket ("shop"), "scenario:<ad>" veya "*" (tüm senaryolar).
+DEFAULT_SELECTION_RULES: dict[str, list[str]] = {
+    # Sunucu (game/src) — klasik dosya adları
+    "shop*.cpp": ["shop"], "shop*.h": ["shop"],
+    "exchange*.cpp": ["trade"], "exchange*.h": ["trade"],
+    "party*.cpp": ["party"], "party*.h": ["party"],
+    "char_item.cpp": ["item", "inventory"], "item*.cpp": ["item"], "item*.h": ["item"],
+    "char_battle.cpp": ["combat"], "battle*.cpp": ["combat"], "mob_manager*.cpp": ["combat", "drop"],
+    "char_skill.cpp": ["combat"], "*drop*": ["drop"],
+    "quest*.cpp": ["quest"], "questlua*.cpp": ["quest"], "*.quest": ["quest"],
+    "input_main.cpp": ["shop", "item", "trade"], "input_login.cpp": ["smoke"],
+    "char.cpp": ["*"], "char.h": ["*"], "packet*.h": ["*"],
+    # Client root
+    "uiQuest.py": ["quest"], "uiShop.py": ["shop"], "uiExchange.py": ["trade"], "uiParty.py": ["party"],
+    "uiInventory.py": ["inventory", "item"], "game.py": ["*"], "intro*.py": ["smoke"],
+    # Bu repo
+    "qa/*": ["*"], "integration/*": ["*"], ".github/*": ["*"], "pyproject.toml": ["*"],
+    # Test gerektirmeyen dosyalar (boş hedef = eşleşti ama senaryo yok)
+    "*.md": [], "*.txt": [], "docs/*": [],
+}
+
+
+@dataclass
+class SelectionConfig:
+    rules: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_SELECTION_RULES))
+    # Hiçbir kurala uymayan değişiklik varsa çalışacak hedefler
+    fallback: list[str] = field(default_factory=lambda: ["smoke"])
+    # Her seçime eklenen hedefler
+    always: list[str] = field(default_factory=lambda: ["smoke"])
+    # true ise qa.toml'daki rules varsayılanların üzerine eklenir; false ise yerini alır
+    extend_defaults: bool = True
+
+
 @dataclass
 class AccountsConfig:
     allowed_prefix: str = "AI_QA_"
@@ -75,6 +110,7 @@ class QaConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     build: BuildConfig = field(default_factory=BuildConfig)
     accounts: AccountsConfig = field(default_factory=AccountsConfig)
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
 
     def resolve(self, p: Path | str) -> Path:
         p = Path(p)
@@ -136,6 +172,7 @@ def load_config(path: Path | str | None = None) -> QaConfig:
             "server": cfg.server,
             "build": cfg.build,
             "accounts": cfg.accounts,
+            "selection": cfg.selection,
         }
         for key, value in data.items():
             if key in sections:
@@ -146,6 +183,10 @@ def load_config(path: Path | str | None = None) -> QaConfig:
                 setattr(cfg, key, value)
             else:
                 raise ConfigError(f"Bilinmeyen ayar: {key}")
+    if path is not None:
+        sel = data.get("selection", {})
+        if "rules" in sel and cfg.selection.extend_defaults:
+            cfg.selection.rules = {**DEFAULT_SELECTION_RULES, **sel["rules"]}
     pw = os.environ.get("QA_ACCOUNT_PASSWORD")
     if pw:
         cfg.accounts.password = pw

@@ -18,6 +18,7 @@ from .replay import replay_run
 from .scenario.loader import list_scenarios, load_scenario, save_scenario, scenario_path
 from .scenario.runner import ScenarioRunner, load_run_report, send_qa_command
 from .scenario.schema import SETUP_OPS
+from .selection import git_changed_files, select
 from .session import BridgeFactory
 from .sim.world import FAULTS, SimWorld
 from .store.artifacts import read_artifact
@@ -95,6 +96,23 @@ class QaService:
         for r in results:
             counts[r["result"]] = counts.get(r["result"], 0) + 1
         return {"ok": all(r["result"] == "PASSED" for r in results), "counts": counts, "results": results}
+
+    def select_affected(self, changed_files: list[str] | None = None, base: str = "HEAD") -> dict[str, Any]:
+        if changed_files is None:
+            changed_files = git_changed_files(self.cfg.resolve(self.cfg.source_repo), base)
+        return select(self.cfg, changed_files, self.list_scenarios())
+
+    def run_affected(self, changed_files: list[str] | None = None, base: str = "HEAD",
+                     seed: int | None = None, dry_run: bool = False) -> dict[str, Any]:
+        sel = self.select_affected(changed_files, base)
+        if dry_run or not sel["selected"]:
+            return {"ok": True, "ran": False, **sel}
+        results = []
+        for name in sel["selected"]:
+            rep = self.run_scenario(name, seed)
+            results.append({"scenario": name, "run_id": rep["run_id"], "result": rep["result"],
+                            "summary": rep["summary"]})
+        return {"ok": all(r["result"] == "PASSED" for r in results), "ran": True, **sel, "results": results}
 
     def replay_failure(self, run_id: str, times: int = 3) -> dict[str, Any]:
         return replay_run(self.runner, run_id, times)

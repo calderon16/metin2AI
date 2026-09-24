@@ -55,6 +55,7 @@ def list_scenarios(directory: Path) -> list[dict[str, Any]]:
         try:
             sc = parse_scenario(p.read_text(encoding="utf-8"))
             out.append({"name": sc.name, "file": p.name, "description": sc.description.strip(), "tags": sc.tags,
+                        "covers": sc.covers,
                         "steps": len(sc.steps)})
         except ScenarioError as e:
             out.append({"name": p.stem, "file": p.name, "error": str(e)})

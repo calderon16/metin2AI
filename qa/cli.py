@@ -3,6 +3,7 @@
     metin2-qa list
     metin2-qa run kill_mob_pickup --seed 846219
     metin2-qa run --all [--tag smoke]       # hata varsa çıkış kodu 1
+    metin2-qa affected --base origin/main --run   # sadece değişikliğin etkilediği senaryolar
     metin2-qa replay QA-2026-00012 --times 5
     metin2-qa runs --status FAILED
     metin2-qa show QA-2026-00012 [--trace]
@@ -23,6 +24,15 @@ def _print(data) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
 
+def _write_summary(path: str | None, results: list[dict], title: str, selection: dict | None = None) -> None:
+    if not path:
+        return
+    from .store.report import markdown_summary
+
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(markdown_summary(results, title, selection) + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="metin2-qa", description="Metin2 AI QA Player")
     ap.add_argument("--config", help="qa.toml yolu (varsayılan: QA_CONFIG / ./qa.local.toml / ./qa.toml)")
@@ -34,6 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true")
     p.add_argument("--tag")
     p.add_argument("--seed", type=int)
+    p.add_argument("--summary-md", help="Sonuç tablosunu bu markdown dosyasına ekle (ör. $GITHUB_STEP_SUMMARY)")
+    p = sub.add_parser("affected", help="Değişen dosyalara göre senaryo seç (ve --run ile çalıştır)")
+    p.add_argument("files", nargs="*", help="Değişen dosyalar (verilmezse git diff --base)")
+    p.add_argument("--base", default="HEAD", help="git diff tabanı (ör. origin/main)")
+    p.add_argument("--run", action="store_true")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--summary-md")
     p = sub.add_parser("replay", help="Run'ı aynı seed ile tekrar oynat")
     p.add_argument("run_id")
     p.add_argument("--times", type=int, default=3)
@@ -70,20 +87,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "run":
         if a.all or a.tag:
-            res = s.run_suite(a.tag, a.seed)
-            for r in res["results"]:
-                print(r["summary"])
-            print(json.dumps(res["counts"]))
-            return 0 if res["ok"] else 1
-        if not a.names:
+            results = s.run_suite(a.tag, a.seed)["results"]
+        elif a.names:
+            results = []
+            for n in a.names:
+                rep = s.run_scenario(n, a.seed)
+                results.append({"scenario": n, "run_id": rep["run_id"], "result": rep["result"],
+                                "summary": rep["summary"]})
+        else:
             ap.error("senaryo adı veya --all gerekli")
-        ok = True
-        for n in a.names:
-            rep = s.run_scenario(n, a.seed)
-            print(rep["summary"])
-            print(f"  kanıt: {s.cfg.artifacts_path / rep['run_id']}")
-            ok &= rep["result"] == "PASSED"
-        return 0 if ok else 1
+        for r in results:
+            print(r["summary"])
+        _write_summary(a.summary_md, results, f"Metin2 QA — seed {a.seed if a.seed is not None else 'rastgele'}")
+        return 0 if all(r["result"] == "PASSED" for r in results) else 1
+    if a.cmd == "affected":
+        res = s.run_affected(a.files or None, a.base, a.seed, dry_run=not a.run)
+        print(f"Değişen: {len(res['changed_files'])} dosya, seçilen: {len(res['selected'])} senaryo")
+        for n in res["selected"]:
+            print(f"  + {n}: {'; '.join(res['reasons'][n][:3])}")
+        if res["unmatched_files"]:
+            print(f"  (kurala uymayan: {', '.join(res['unmatched_files'][:10])})")
+        for r in res.get("results", []):
+            print(r["summary"])
+        if res.get("ran"):
+            _write_summary(a.summary_md, res["results"], "Metin2 QA — değişikliğe göre seçilen testler", res)
+        return 0 if res["ok"] else 1
     if a.cmd == "replay":
         res = s.replay_failure(a.run_id, a.times)
         print(f"{res['verdict']} (deterministic_trace={res['deterministic_trace']})")

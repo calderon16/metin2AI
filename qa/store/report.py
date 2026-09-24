@@ -43,3 +43,22 @@ def summarize(report: dict[str, Any]) -> str:
     extra = f" (+{len(report['failures']) - 1} hata daha)" if len(report["failures"]) > 1 else ""
     return f"{base}: {where} — {f.get('name')}: {f.get('message') or ''} " \
            f"beklenen={f.get('expected')} gerçekleşen={f.get('actual')}{extra}"
+
+
+def markdown_summary(results: list[dict[str, Any]], title: str, selection: dict[str, Any] | None = None) -> str:
+    """CI özeti (GitHub $GITHUB_STEP_SUMMARY) için markdown tablo."""
+    icon = {"PASSED": "✅", "FAILED": "❌", "ERROR": "⚠️"}
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r["result"]] = counts.get(r["result"], 0) + 1
+    lines = [f"### {title}", "", " · ".join(f"{icon.get(k, '')} {k}: {v}" for k, v in sorted(counts.items())), ""]
+    if selection:
+        lines += [f"Değişen dosya: {len(selection['changed_files'])} · seçilen senaryo: {len(selection['selected'])}"
+                  f" · atlanan: {len(selection['skipped'])}", ""]
+    lines += ["| Senaryo | Sonuç | Run | Özet |", "|---|---|---|---|"]
+    for r in results:
+        summary = str(r.get("summary", "")).replace("|", "\\|").replace("\n", " ")
+        if len(summary) > 300:
+            summary = summary[:300] + "…"
+        lines.append(f"| {r['scenario']} | {icon.get(r['result'], '')} {r['result']} | {r.get('run_id', '')} | {summary} |")
+    return "\n".join(lines)

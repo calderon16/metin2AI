@@ -1,6 +1,7 @@
 name: npc_shop_buy_sell
 description: Genel Mağaza (9001) üzerinden iksir al/sat; yang ve envanter değişimini doğrula.
 tags: [npc, shop, gold]
+covers: ["shop.cpp", "shop_manager.cpp", "uiShop.py"]
 account: AI_QA_001
 setup:
   - set_gold: 1000

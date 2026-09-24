@@ -1,6 +1,7 @@
 name: shop_insufficient_gold
 description: Edge-case — yang yetersizken satın alma reddedilmeli, yang eksiye düşmemeli, item verilmemeli.
 tags: [npc, shop, gold, edge-case]
+covers: ["shop.cpp", "shop_manager.cpp"]
 account: AI_QA_001
 setup:
   - set_gold: 30

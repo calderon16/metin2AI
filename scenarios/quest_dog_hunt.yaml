@@ -3,6 +3,7 @@ description: >
   Köy Muhafızı (20016) görevi — "Battle Pass" tipi ilerleme testi. Görevi al, 5 Yaban Köpeği kes,
   ilerlemenin 5/5 olduğunu doğrula, ödülü al (5x iksir + 500 yang).
 tags: [quest, npc, dialog, combat]
+covers: ["questlua*.cpp", "dog_hunt.quest", "uiQuest.py"]
 account: AI_QA_001
 setup:
   - set_level: 12

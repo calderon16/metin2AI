@@ -1,6 +1,7 @@
 name: kill_mob_pickup
 description: Yaban Köpeği (101) kes, düşen Köpek Dişi (30000) itemlerini topla, exp kazancını doğrula.
 tags: [combat, item, drop]
+covers: ["char_battle.cpp", "mob_manager.cpp", "item_manager.cpp"]
 account: AI_QA_001
 setup:
   - set_level: 10

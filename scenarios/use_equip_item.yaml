@@ -1,6 +1,7 @@
 name: use_equip_item
 description: Kılıç ve zırh giy, hasar alıp iksir kullan; ekipman ve HP değişimini doğrula.
 tags: [inventory, equip, item]
+covers: ["char_item.cpp", "uiInventory.py"]
 account: AI_QA_001
 setup:
   - give_item: {vnum: 10, count: 1}

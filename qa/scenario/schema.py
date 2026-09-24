@@ -167,6 +167,8 @@ class Scenario(BaseModel):
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
+    # Bu senaryonun test ettiği kaynak dosyalar (glob). Değişikliğe göre test seçiminde kullanılır.
+    covers: list[str] = Field(default_factory=list)
     account: str | None = None
     character: str | None = None
     seed: int | None = None
@@ -204,7 +206,7 @@ class Scenario(BaseModel):
         d: dict[str, Any] = {"name": self.name}
         if self.description:
             d["description"] = self.description
-        for k in ("tags", "account", "character", "seed", "sim_faults"):
+        for k in ("tags", "covers", "account", "character", "seed", "sim_faults"):
             v = getattr(self, k)
             if v:
                 d[k] = v

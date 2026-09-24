@@ -80,3 +80,17 @@ def test_load_config(tmp_path, monkeypatch):
     p.write_text("[bridge]\nnope = 1\n")
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+def test_client_bridge_is_python2_compatible():
+    """integration/client/qa_bridge.py klasik istemcinin Python 2.7'siyle çalışmalı."""
+    import warnings
+    from pathlib import Path
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lib2to3 = pytest.importorskip("lib2to3")
+        from lib2to3 import pygram, pytree
+        from lib2to3.pgen2 import driver
+    src = (Path(__file__).resolve().parents[1] / "integration/client/qa_bridge.py").read_text(encoding="utf-8")
+    driver.Driver(pygram.python_grammar_no_print_statement, convert=pytree.convert).parse_string(src)

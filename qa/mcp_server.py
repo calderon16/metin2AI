@@ -20,8 +20,9 @@ from .service import QaService
 
 INSTRUCTIONS = """Metin2 AI QA Player. Gerçek bir QA karakteriyle (AI_QA_*) oyuna girip sistemleri
 normal oyuncu yolundan (login → paket → sunucu → DB) test eder.
-- Senaryo yazmadan önce `qa_reference` ile behaviour/assertion listesini al.
-- Değişiklikten sonra: build → run_scenario (veya run_suite) → FAILED ise get_test_result + get_trace +
+- Senaryo yazmadan önce `qa_reference` ile behaviour/assertion listesini al. Yeni senaryoya test
+  ettiği kaynak dosyaları `covers:` ile yaz (ör. covers: ["pet_system.cpp"]) ki run_affected onu seçsin.
+- Değişiklikten sonra: build → run_affected (değişen dosyalara göre) veya run_suite → FAILED ise get_test_result + get_trace +
   get_server_logs + get_screenshot ile kök nedeni bul → düzelt → tekrar çalıştır.
 - Hata gerçek mi? replay_failure(run_id) aynı seed ile tekrar oynatır ("REPRODUCED 3/3").
 - Serbest keşif: explore_start(goal) → explore_step(...) döngüsü → explore_finish(findings, save_as_scenario).
@@ -99,6 +100,15 @@ def run_scenario(name: str, seed: int | None = None) -> dict[str, Any]:
 def run_suite(tag: str | None = None, seed: int | None = None) -> dict[str, Any]:
     """Tüm senaryoları (veya bir etikettekileri) çalıştırır — regression testi."""
     return svc().run_suite(tag, seed)
+
+
+@mcp.tool()
+def run_affected(changed_files: list[str] | None = None, base: str = "HEAD", seed: int | None = None,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Değişen dosyalara göre sadece ilgili senaryoları çalıştırır. changed_files verilmezse kaynak
+    repoda `git diff <base>` + izlenmeyen dosyalar kullanılır. Her senaryo için seçilme nedeni döner.
+    dry_run=true: sadece hangi senaryoların seçileceğini göster."""
+    return svc().run_affected(changed_files, base, seed, dry_run)
 
 
 @mcp.tool()

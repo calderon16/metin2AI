@@ -1,0 +1,109 @@
+name: Metin2 QA
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # Her gece rastgele seed ile tüm senaryolar (seed'e bağlı gizli hataları yakalamak için)
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed (boş = rastgele)"
+        required: false
+
+concurrency:
+  group: qa-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: pytest (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+
+  scenarios:
+    name: senaryolar (seed ${{ matrix.seed }})
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ["1", "846219"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e .
+      - name: Tüm senaryolar
+        run: metin2-qa run --all --seed ${{ matrix.seed }} --summary-md "$GITHUB_STEP_SUMMARY"
+      - name: Kanıtları yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-artifacts-seed-${{ matrix.seed }}
+          path: artifacts/
+          retention-days: 14
+
+  affected:
+    name: değişikliğe göre seçilen testler
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e .
+      - name: Etkilenen senaryolar
+        run: >
+          metin2-qa affected --base "origin/${{ github.base_ref }}" --run --seed 1
+          --summary-md "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-artifacts-affected
+          path: artifacts/
+          retention-days: 14
+
+  nightly:
+    name: gece — rastgele seed
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e .
+      - name: Tüm senaryolar (rastgele seed — başarısız run'ın seed'i raporda)
+        env:
+          SEED: ${{ github.event.inputs.seed }}
+        run: metin2-qa run --all ${SEED:+--seed "$SEED"} --summary-md "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-artifacts-nightly
+          path: artifacts/
+          retention-days: 30

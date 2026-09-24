@@ -1,6 +1,7 @@
 name: smoke_login_walk
 description: Login → karakter seçimi → haritada yürüme → ekran görüntüsü. En temel duman testi.
 tags: [smoke, movement]
+covers: ["input_login.cpp", "char_state.cpp"]
 account: AI_QA_001
 steps:
   - walk_to: {x: 6000, y: 6000}
