@@ -90,7 +90,10 @@ def test_client_bridge_is_python2_compatible():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         lib2to3 = pytest.importorskip("lib2to3")
-        from lib2to3 import pygram, pytree
-        from lib2to3.pgen2 import driver
+        try:
+            from lib2to3 import pygram, pytree
+            from lib2to3.pgen2 import driver
+        except FileNotFoundError:
+            pytest.skip("Bu Python kurulumunda lib2to3 gramer dosyası eksik")
     src = (Path(__file__).resolve().parents[1] / "integration/client/qa_bridge.py").read_text(encoding="utf-8")
     driver.Driver(pygram.python_grammar_no_print_statement, convert=pytree.convert).parse_string(src)

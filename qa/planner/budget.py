@@ -41,6 +41,7 @@ CREATE INDEX IF NOT EXISTS llm_usage_month ON llm_usage(month);
 
 # Aynı süreçteki tüm keşifler (paralel daemon işleri dahil) tek hız sınırını paylaşır
 _RATE_LOCK = threading.Lock()
+_BUDGET_LOCK = threading.Lock()
 _LAST_CALL: dict[str, float] = {}
 
 
@@ -165,8 +166,10 @@ class BudgetedProvider:
             time.sleep(wait)
 
     def chat(self, system: str, messages: list[Message], tools: list[ToolSpec]) -> LLMReply:
-        self.budget.check()
-        self._rate_limit()
-        reply = self.inner.chat(system, messages, tools)
-        self.budget.record(self.name, self.model, self.run_id, reply.usage)
-        return reply
+        # Paralel keşifler aynı günlük tavanı aşamasın: kontrol ve kayıt tek işlem sırası.
+        with _BUDGET_LOCK:
+            self.budget.check()
+            self._rate_limit()
+            reply = self.inner.chat(system, messages, tools)
+            self.budget.record(self.name, self.model, self.run_id, reply.usage)
+            return reply

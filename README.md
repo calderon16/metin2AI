@@ -227,6 +227,23 @@ Gerçek client'ta her ajan ayrı `Metin2_QA.exe` örneğidir (`[bridge.agent_por
 
 ## Otonom keşif ajanı (Gemini)
 
+### LLM maliyeti ve bütçe
+
+Keşif çağrıları `artifacts/qa.sqlite` içindeki `llm_usage` tablosuna istek, girdi/çıktı ve
+önbellek token'larıyla kaydedilir. `metin2-qa llm-usage` komutu ve panelin genel bakışındaki
+**LLM kullanımı** kartı bugün ve bu ayın toplamını gösterir. Ücretsiz katmanda gerçek maliyet
+0 USD olarak kaydedilir; yapılandırılan fiyatlarla hesaplanan “ücretli olsaydı” tutarı da görünür.
+Bu fiyatlar `qa.toml` içindeki örnek değerlerdir; sağlayıcının güncel fiyatı değişirse düzenleyin.
+
+`[explorer]` ayarlarında `requests_per_minute` hız sınırını, `daily_request_limit` günlük
+istek tavanını, isteğe bağlı `daily_token_limit` günlük token tavanını ve ücretli moddaki
+`monthly_cost_limit_usd` harcama tavanını belirler. Tavan dolunca yeni keşif işi reddedilir;
+devam eden keşif `budget_exhausted` ile durur. Kampanyadaki keşif adımı “atlandı (bütçe)”
+olarak işaretlenir. `thinking_budget=0`, `history_turns=10` ve `max_total_tokens=600000`
+varsayılanları istem başına token sayısını sınırlar. `qa.local.toml` kullanılıyorsa değişiklikleri
+onun yalnız `[explorer]` bölümünde yapın; çalışan servise uygulamak için yönetici onayıyla
+yeniden başlatın. API anahtarı ve panel/QA parolaları yapılandırma dosyasına yazılmaz.
+
 Hedefi verirsin, ajan oyunu kendi başına oynar, edge-case arar ve bulgularını raporlar:
 
 ```bash

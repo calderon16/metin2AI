@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def cfg(tmp_path: Path) -> QaConfig:
     c = QaConfig(root=ROOT, artifacts_dir=tmp_path / "artifacts", db_path=tmp_path / "qa.sqlite")
+    c.explorer.requests_per_minute = 0
     return c
 
 
