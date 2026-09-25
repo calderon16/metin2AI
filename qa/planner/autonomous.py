@@ -57,6 +57,7 @@ Kurallar:
 - Reddedilmesi GEREKEN bir işlemi denediğinde adıma `expect_error` ver (ör. NOT_ENOUGH_GOLD).
 - Kendi hatalı çağrını (yanlış vnum, uzaktaki NPC vb.) bulgu sanma; bulgu = oyunun yanlış davranması.
 - Her gerçek bulguyu `report_finding` ile kanıtıyla (adım, beklenen, gerçekleşen) kaydet.
+- `finish` çağırmadan önce en az bir gerçek oyuncu aksiyonu yap; yalnız gözlem yeterli değildir.
 - Edge-case'lere odaklan: sınır değerler, yetersiz yang, dolu envanter, tekrar eden işlemler,
   yeniden bağlanma (reconnect), ölüp dirilme, pencereyi kapatıp açma.
 - Bütçen sınırlı: {max_steps} oyuncu adımı. Bitirirken `finish` çağır ve kısa bir özet yaz.
@@ -290,6 +291,10 @@ class AutoExplorer:
                 finished = False
                 for call in calls:
                     if call.name == "finish":
+                        if steps == 0:
+                            results.append(ToolResult(call.name, {"ok": False,
+                                "error": "En az bir gerçek oyuncu aksiyonu yapmadan keşif bitirilemez."}, call.id))
+                            continue
                         agent_summary = str(call.args.get("summary", ""))
                         results.append(ToolResult(call.name, {"ok": True}, call.id))
                         finished = True

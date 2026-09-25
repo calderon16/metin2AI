@@ -75,12 +75,24 @@ def test_setup_only_before_first_step(service):
 
 def test_invalid_qa_setup_is_reported_to_model(service):
     script = [{"name": "qa_setup", "args": {"ops": "- give_item: {vnum: 99999999, count: 1}"}},
+              {"name": "wait", "args": {"ms": 50}},
               {"name": "finish", "args": {"summary": "Geçersiz eşya reddedildi"}}]
     prov = ScriptedProvider(script)
     out = AutoExplorer(service.cfg, service.store, prov, service.factory).run("Eşya doğrulaması", seed=2)
     assert out.stop_reason == "finished" and out.result != "ERROR"
     result = [r.content for m in prov.seen[-1] if m.role == "tool" for r in m.tool_results]
     assert any("SetupError" in str(r.get("error")) for r in result)
+
+
+def test_finish_requires_real_player_step(service):
+    script = [{"name": "finish", "args": {"summary": "çok erken"}},
+              {"name": "wait", "args": {"ms": 50}},
+              {"name": "finish", "args": {"summary": "denendi"}}]
+    prov = ScriptedProvider(script)
+    out = AutoExplorer(service.cfg, service.store, prov, service.factory).run("Hareket testi", seed=4)
+    assert out.stop_reason == "finished" and out.steps == 1 and out.turns == 3
+    results = [r.content for m in prov.seen[1] if m.role == "tool" for r in m.tool_results]
+    assert any("en az bir" in str(r.get("error", "")).lower() for r in results)
 
 
 def test_budget_and_bad_calls(service):
