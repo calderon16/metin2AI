@@ -24,3 +24,11 @@ nssm start Metin2QA
 
 **Görev Zamanlayıcı** — "Bilgisayar başladığında" tetikleyicisiyle, "kullanıcı oturum açmış olsun ya da
 olmasın çalıştır" seçeneğiyle aynı komutu çalıştıran bir görev oluşturun.
+
+**Görev Zamanlayıcı (komut satırından)** — `run-daemon.cmd` depo kökünde `qa.local.toml` ile daemon'u başlatır,
+çıktıyı `artifacts\daemon.log`'a yazar; şifreler kullanıcı ortam değişkenlerinden gelir:
+```bat
+schtasks /Create /TN Metin2QA /SC ONLOGON /RL LIMITED /TR "\"C:\yol\metin2AI\deploy\windows\run-daemon.cmd\""
+schtasks /Run /TN Metin2QA
+```
+Panel `http://127.0.0.1:8765`. Kaldırmak: `schtasks /Delete /TN Metin2QA /F`.
