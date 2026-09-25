@@ -73,6 +73,16 @@ def test_setup_only_before_first_step(service):
     assert "ilk oyuncu adımından önce" in last_tool_msg.tool_results[0].content["error"]
 
 
+def test_invalid_qa_setup_is_reported_to_model(service):
+    script = [{"name": "qa_setup", "args": {"ops": "- give_item: {vnum: 99999999, count: 1}"}},
+              {"name": "finish", "args": {"summary": "Geçersiz eşya reddedildi"}}]
+    prov = ScriptedProvider(script)
+    out = AutoExplorer(service.cfg, service.store, prov, service.factory).run("Eşya doğrulaması", seed=2)
+    assert out.stop_reason == "finished" and out.result != "ERROR"
+    result = [r.content for m in prov.seen[-1] if m.role == "tool" for r in m.tool_results]
+    assert any("SetupError" in str(r.get("error")) for r in result)
+
+
 def test_budget_and_bad_calls(service):
     script = [[{"name": "wait", "args": {"ms": 50}}, {"name": "rm_rf", "args": {}}]] * 10
     prov = ScriptedProvider(script)
