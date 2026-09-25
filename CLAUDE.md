@@ -22,6 +22,8 @@ düzelt → tekrar çalıştır → `replay_failure(eski_run)` ile düzeltmeyi d
 geliştirdiğinde onun senaryosunu da `write_scenario` ile ekle.
 
 ## Otonom keşif (Gemini)
+LLM istek/token/maliyet durumunu `metin2-qa llm-usage` ile kontrol et. Bütçe doluysa
+keşif başlatma; `qa.toml` veya yerel dosyanın yalnız `[explorer]` bölümünü düzenle.
 `metin2-qa explore` / MCP `explore_autonomous`. Anahtar `GEMINI_API_KEY` ortam değişkeninde; asla dosyaya
 veya commit'e yazma. Testler gerçek API çağırmaz (`ScriptedProvider` ve yerel sahte HTTP sunucusu).
 Üretilen `scenarios/auto_*.yaml` dosyalarını commit'lemeden önce gözden geçir.

@@ -30,8 +30,9 @@ def test_tool_schemas():
     assert "trade_with" not in tools
     km = tools["kill_monster"].parameters
     assert km["properties"]["vnum"]["type"] == "integer" and km["required"] == ["vnum"]
-    assert km["properties"]["auto_potion"]["type"] == "boolean"
-    assert "match" not in tools["wait_for_event"].parameters["properties"]   # dict parametreler atlanır
+    assert "auto_potion" not in km["properties"]
+    assert {"wait_for_event", "screenshot", "trade_with", "party_invite"}.isdisjoint(tools)
+    assert all("expect_error" in t.parameters["properties"] for t in behaviour_tools())
     assert all(n.replace("_", "").isalnum() for n in tools)
 
 
@@ -154,7 +155,7 @@ def test_gemini_retries_then_fails(monkeypatch):
 
     monkeypatch.setattr("time.sleep", lambda s: None)
     p = GeminiProvider("m", api_key="k", opener=opener, max_retries=2)
-    with pytest.raises(LLMError, match="429"):
+    with pytest.raises(LLMError, match="kotası aşıldı"):
         p.chat("s", [Message("user", "x")], [])
     assert len(calls) == 3
 

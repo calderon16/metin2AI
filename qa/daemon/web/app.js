@@ -207,8 +207,8 @@ function findingsTable(items) {
 }
 
 async function overview() {
-  const [st, agents, jobs, findings, catalog] = await Promise.all([
-    api("/status"), api("/agents"), api("/jobs?limit=8"), api("/findings?status=new,confirmed,flaky,regressed&limit=8"), api("/catalog"),
+  const [st, agents, jobs, findings, catalog, usage] = await Promise.all([
+    api("/status"), api("/agents"), api("/jobs?limit=8"), api("/findings?status=new,confirmed,flaky,regressed&limit=8"), api("/catalog"), api("/llm-usage"),
   ]);
   state.status = st;
   updateEnv(st);
@@ -217,6 +217,8 @@ async function overview() {
   const online = (st.agents.online || 0) + (st.agents.busy || 0);
   const total = Object.values(st.agents).reduce((a, b) => a + b, 0);
   const counts = (lc && lc.summary && lc.summary.counts) || {};
+  const today = usage.today || {}, month = usage.month || {}, limits = usage.limits || {};
+  const cachePct = today.input_tokens ? Math.round(100 * (today.cached_tokens || 0) / today.input_tokens) : 0;
   return `
   <div class="page-head"><div><h1>Genel bakış</h1><div class="muted">AI oyuncular test sunucusunda 7/24 çalışır. Mod: <b>${esc(st.bridge_mode)}</b></div></div>
     <div class="row"><button class="btn primary" data-act="quickCampaign">Her şeyi test et</button><a class="btn" href="#/gorev">Görev ver</a></div></div>
@@ -228,6 +230,12 @@ async function overview() {
       <div class="sub">${lc ? `${lc.status === "done" ? "sistem geçti" : esc(lc.status)} · ${ago(lc.finished_at || lc.started_at)}` : "henüz yok"}</div></div>
   </div>
   <div class="stack" style="margin-top:14px">
+    <div class="card llm-usage"><div class="row" style="justify-content:space-between"><h2>LLM kullanımı</h2><small>${usage.free_tier ? "Ücretsiz katman" : "Ücretli kullanım"}</small></div>
+      <dl class="kv"><dt>Bugün</dt><dd>${esc(today.requests || 0)} / ${esc(limits.daily_requests ?? "∞")} istek · ${Number(today.total_tokens || 0).toLocaleString("tr-TR")} token</dd>
+      <dt>Önbellek</dt><dd>%${cachePct} · ${Number(today.cached_tokens || 0).toLocaleString("tr-TR")} token</dd>
+      <dt>Maliyet</dt><dd>$${Number(today.cost_usd || 0).toFixed(4)} · ücretli olsaydı $${Number(today.list_cost_usd || 0).toFixed(4)}</dd>
+      <dt>Bu ay</dt><dd>${esc(month.requests || 0)} istek · ${Number(month.total_tokens || 0).toLocaleString("tr-TR")} token · $${Number(month.cost_usd || 0).toFixed(4)}</dd></dl>
+      ${usage.blocked ? `<div class="fail-box">Keşif bütçesi doldu: ${esc(usage.blocked)}</div>` : ""}</div>
     <div class="card"><div class="row" style="justify-content:space-between"><h2>Sistem sağlığı</h2>${lc ? `<a href="#/kampanya/${lc.id}">Kampanya #${lc.id} →</a>` : ""}</div>
       ${matrixHtml(catalog, (lc && lc.matrix) || {})}</div>
     <div><h3>Ajanlar</h3><div class="agents">${agents.map(agentCard).join("") || `<div class="card empty">Ajan yok.</div>`}</div></div>
@@ -268,7 +276,9 @@ async function agentsPage() {
 async function newJobPage() {
   const [scenarios, catalog, st] = await Promise.all([api("/scenarios"), api("/catalog"), api("/status")]);
   const tags = [...new Set(scenarios.flatMap((s) => s.tags || []))].sort();
-  const llm = st.llm.available;
+  const blocked = st.llm.budget && st.llm.budget.blocked;
+  const llm = st.llm.available && !blocked;
+  const llmReason = blocked || "LLM anahtarı tanımlı değil (GEMINI_API_KEY)";
   state.formData = { scenarios };
   return `<div class="page-head"><div><h1>Görev ver</h1><div class="muted">İş kuyruğa girer; boştaki ajanlar alır ve raporu panele yazar.</div></div></div>
   <form class="card form" data-act="submitJob" id="jobForm">
@@ -277,13 +287,13 @@ async function newJobPage() {
       <button type="button" data-type="scenario">Senaryo</button>
       <button type="button" data-type="suite">Suite (etiket)</button>
       <button type="button" data-type="affected">Değişen dosyalar</button>
-      <button type="button" data-type="explore" ${llm ? "" : "disabled title='LLM anahtarı tanımlı değil (GEMINI_API_KEY)'"}>Serbest keşif (AI)</button>
+      <button type="button" data-type="explore" ${llm ? "" : `disabled title="${esc(llmReason)}"`}>Serbest keşif (AI)</button>
     </div></label>
     <input type="hidden" name="type" value="campaign">
     <div data-for="campaign" class="stack">
       <label>Sistemler <span class="hint">Boş bırakılırsa katalogdaki tüm sistemler</span>
         <div class="checks">${catalog.map((s) => `<label><input type="checkbox" name="systems" value="${esc(s.id)}"> ${esc(s.name)} <small>(${s.scenarios.length})</small></label>`).join("")}</div></label>
-      <label class="checks"><label><input type="checkbox" name="explore" ${llm ? "checked" : "disabled"}> Her sistemde AI keşfi de yap ${llm ? "" : "<small>(LLM anahtarı yok)</small>"}</label></label>
+      <label class="checks"><label><input type="checkbox" name="explore" ${llm ? "checked" : "disabled"}> Her sistemde AI keşfi de yap ${llm ? "" : `<small>(${esc(llmReason)})</small>`}</label></label>
     </div>
     <div data-for="scenario" hidden><label>Senaryo<select name="name">${scenarios.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} — ${esc((s.description || "").slice(0, 70))}</option>`).join("")}</select></label></div>
     <div data-for="suite" hidden><label>Etiket<select name="tag"><option value="">(tüm senaryolar)</option>${tags.map((t) => `<option>${esc(t)}</option>`).join("")}</select></label></div>
@@ -449,7 +459,7 @@ async function campaignPage(id) {
   const rows = Object.entries(m).map(([sid, v]) => `<tr><td><b>${esc(v.name || names[sid] || sid)}</b>${(s.regressions || []).includes(sid) ? ' <span class="badge bad">yeni kırmızı</span>' : ""}</td>
     <td>${badge(SYS, v.status)}</td>
     <td>${(v.scenarios || []).map((r) => `<a href="#/run/${esc(r.run_id)}">${badge(RESULT, r.result)} ${esc(r.scenario)}</a>`).join("<br>") || '<span class="muted">senaryo yok</span>'}</td>
-    <td>${v.explore ? (v.explore.error ? `<small class="muted">${esc(v.explore.error)}</small>` : `<a href="#/run/${esc(v.explore.run_id)}">${esc(v.explore.findings)} bulgu</a>`) : "—"}</td>
+    <td>${v.explore ? (v.explore.skipped ? `<small class="muted">atlandı (bütçe): ${esc(v.explore.skipped)}</small>` : v.explore.error ? `<small class="muted">${esc(v.explore.error)}</small>` : `<a href="#/run/${esc(v.explore.run_id)}">${esc(v.explore.findings)} bulgu</a>`) : "—"}</td>
     <td class="num">${esc(v.duration_s)} sn</td></tr>`).join("");
   return `<div class="page-head"><div><h1>Kampanya #${c.id}</h1><div class="muted">${fmtTime(c.started_at)} → ${fmtTime(c.finished_at)} · ${esc(s.duration_s ?? "—")} sn${s.previous_campaign ? ` · önceki: <a href="#/kampanya/${s.previous_campaign}">#${s.previous_campaign}</a>` : ""}</div></div></div>
   <div class="stack">

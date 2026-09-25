@@ -61,12 +61,21 @@ error_patterns = ["SYSERR", "Traceback", "QUEST_ERROR", "SQL error"]
 [explorer]
 # Otonom keşif ajanı. API anahtarı BURAYA YAZILMAZ: api_key_env'deki ortam değişkeninden okunur.
 provider = "gemini"
-# model = "gemini-2.5-flash"      # boşsa GEMINI_MODEL ortam değişkeni, o da yoksa gemini-2.5-flash
+model = "gemini-2.5-flash-lite"     # keşif modeli
 api_key_env = "GEMINI_API_KEY"
 temperature = 0.4
 max_steps = 60                    # keşif başına oyuncu adımı bütçesi
-max_total_tokens = 2000000        # keşif başına token tavanı (maliyet sınırı)
-history_turns = 30                # bağlamda tutulan son tur sayısı
+max_total_tokens = 600000         # keşif başına token tavanı
+history_turns = 10                # bağlamda tutulan son tur sayısı
+thinking_budget = 0              # düşünme token'ları; 0 = kapalı
+free_tier = true                  # ücretsiz katmanda gerçek maliyet 0 kaydedilir
+requests_per_minute = 10         # dakikadaki en fazla istek; 0 = sınırsız
+daily_request_limit = 900        # günlük istek tavanı
+# daily_token_limit = 1000000     # isteğe bağlı günlük token tavanı
+monthly_cost_limit_usd = 5       # yalnız ücretli katmanda geçerli
+price_input_per_m = 0.10         # 1 milyon girdi token'ı için varsayımsal USD
+price_output_per_m = 0.40        # 1 milyon çıktı token'ı için varsayımsal USD
+price_cached_per_m = 0.025       # 1 milyon önbellek token'ı için varsayımsal USD
 
 [selection]
 # Değişikliğe göre test seçimi (metin2-qa affected / MCP run_affected).

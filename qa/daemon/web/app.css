@@ -170,6 +170,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
+.llm-usage { min-width: 0; overflow-wrap: anywhere; }
+.llm-usage .kv { grid-template-columns: minmax(90px, 120px) minmax(0, 1fr); }
+@media (max-width: 480px) { .llm-usage .kv { grid-template-columns: 1fr; } }
 pre.block { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow: auto;
   max-height: 480px; white-space: pre-wrap; word-break: break-word; margin: 0; }
 .shots { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); }

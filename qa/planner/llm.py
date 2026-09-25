@@ -72,6 +72,26 @@ class LLMProvider(Protocol):
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRY_WAIT_S = 90.0
+
+
+def _quota_info(detail: str) -> tuple[float | None, bool]:
+    """429 gövdesinden (google.rpc RetryInfo / QuotaFailure) bekleme süresi ve günlük kota olup olmadığı."""
+    try:
+        details = json.loads(detail).get("error", {}).get("details", [])
+    except (ValueError, AttributeError):
+        details = []
+    wait, daily = None, False
+    for d in details if isinstance(details, list) else []:
+        t = str(d.get("@type", ""))
+        if t.endswith("RetryInfo"):
+            try:
+                wait = float(str(d.get("retryDelay", "")).rstrip("s"))
+            except ValueError:
+                pass
+        if t.endswith("QuotaFailure"):
+            daily = daily or any("PerDay" in str(v.get("quotaId", "")) for v in d.get("violations", []))
+    return wait, daily
 
 
 def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -95,7 +115,7 @@ class GeminiProvider:
     def __init__(self, model: str, api_key: str | None = None, api_key_env: str = "GEMINI_API_KEY",
                  base_url: str = GEMINI_BASE_URL, temperature: float = 0.4, timeout_s: float = 120.0,
                  max_retries: int = 4, opener: Callable[..., Any] | None = None,
-                 thinking_budget: int | None = None):
+                 thinking_budget: int | None = None, sleep: Callable[[float], None] = time.sleep):
         key = api_key or os.environ.get(api_key_env) or os.environ.get("GOOGLE_API_KEY")
         if not key:
             raise LLMError(f"Gemini API anahtarı yok: {api_key_env} ortam değişkenini ayarlayın")
@@ -107,6 +127,7 @@ class GeminiProvider:
         self.max_retries = max_retries
         self.thinking_budget = thinking_budget
         self._open = opener or urllib.request.urlopen
+        self._sleep = sleep
 
     # -- dönüştürme
     @staticmethod
@@ -136,15 +157,27 @@ class GeminiProvider:
                 with self._open(req, timeout=self.timeout_s) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
-                detail = e.read().decode("utf-8", errors="replace")[:1000]
+                detail = e.read().decode("utf-8", errors="replace")[:4000]
+                if e.code == 429:
+                    wait, daily = _quota_info(detail)
+                    if daily:
+                        raise LLMError(f"Gemini günlük kotası doldu ({self.model}). Yarın sıfırlanır; hemen devam "
+                                       "etmek için Google AI Studio'da faturalandırmayı açın ya da daha yüksek ücretsiz "
+                                       "sınırı olan bir model seçin ([explorer] model).") from e
+                    if attempt < self.max_retries:
+                        self._sleep(min(_MAX_RETRY_WAIT_S, (wait if wait is not None else delay) + 1.0))
+                        delay *= 2
+                        continue
+                    raise LLMError(f"Gemini dakikalık kotası aşıldı ({self.model}); [explorer] "
+                                   "requests_per_minute değerini azaltın. Ayrıntı: " + detail[:300]) from e
                 if e.code in _RETRY_STATUS and attempt < self.max_retries:
-                    time.sleep(delay)
+                    self._sleep(delay)
                     delay *= 2
                     continue
-                raise LLMError(f"Gemini HTTP {e.code}: {detail}") from e
+                raise LLMError(f"Gemini HTTP {e.code}: {detail[:1000]}") from e
             except (urllib.error.URLError, TimeoutError) as e:
                 if attempt < self.max_retries:
-                    time.sleep(delay)
+                    self._sleep(delay)
                     delay *= 2
                     continue
                 raise LLMError(f"Gemini'ye ulaşılamadı: {e}") from e
