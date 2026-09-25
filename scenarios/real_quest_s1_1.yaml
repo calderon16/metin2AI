@@ -1,6 +1,6 @@
 name: real_quest_s1_1
 description: Gerçek sunucu — Metin2Re görev motoru, 1. perde "Yeni Nöbetçi". Görev alma, iki konuşma hedefi, takip satırları, NPC işareti, teslim ve ödül.
-tags: [real, real_only, quest, mr2]
+tags: [real, real_only, needs_client, quest, mr2]
 covers: ["mr2_qlib.lua", "mr2_data.lua", "mr2_s1_1.quest", "mr2quest.py", "uimr2quest.py", "PythonQuestGuide.cpp", "PythonMiniMap.cpp"]
 account: AI_QA_001
 setup:

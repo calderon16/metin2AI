@@ -172,7 +172,7 @@ class Api:
     def catalog(self, q: dict[str, str], b: Any) -> Any:
         from .campaign import scenarios_for
 
-        scenarios = self.d.service.list_scenarios()
+        scenarios = self.d.service.runnable_scenarios()
         last = (self.d.db.list_campaigns(1) or [None])[0]
         matrix = (last or {}).get("matrix") or {}
         return [{**s, "scenarios": scenarios_for(s, scenarios), "last_status": matrix.get(s["id"], {}).get("status")}

@@ -61,6 +61,20 @@ class QaService:
         out = list_scenarios(self.cfg.scenarios_path)
         return [s for s in out if tag is None or tag in s.get("tags", [])]
 
+    def runnable_scenarios(self, tag: str | None = None) -> list[dict[str, Any]]:
+        """Toplu işlerde (grup, kampanya, değişenler) bu bridge modunda çalışabilecek senaryolar.
+        Simülatör: `real_only` hariç. Gerçek sunucu (tcp/headless): yalnızca `real` etiketliler — diğerleri
+        simülatör dünyasının koordinat ve vnum'larını kullanır. Headless: istemci arayüzü isteyen
+        (`needs_client`, ör. görev takip penceresi) senaryolar hariç. Tek senaryo işi bu süzgeçten geçmez."""
+        out = self.list_scenarios(tag)
+        mode = self.cfg.bridge.mode
+        if mode == "sim":
+            return [s for s in out if "real_only" not in (s.get("tags") or [])]
+        out = [s for s in out if "real" in (s.get("tags") or [])]
+        if mode == "headless":
+            out = [s for s in out if "needs_client" not in (s.get("tags") or [])]
+        return out
+
     def get_scenario(self, name: str) -> str:
         return scenario_path(self.cfg.scenarios_path, name).read_text(encoding="utf-8")
 
@@ -85,7 +99,7 @@ class QaService:
 
     def run_suite(self, tag: str | None = None, seed: int | None = None) -> dict[str, Any]:
         results = []
-        for s in self.list_scenarios(tag):
+        for s in self.runnable_scenarios(tag):
             if "error" in s:
                 results.append({"scenario": s["name"], "result": "ERROR", "summary": s["error"]})
                 continue
@@ -100,11 +114,7 @@ class QaService:
     def select_affected(self, changed_files: list[str] | None = None, base: str = "HEAD") -> dict[str, Any]:
         if changed_files is None:
             changed_files = git_changed_files(self.cfg.resolve(self.cfg.source_repo), base)
-        scenarios = self.list_scenarios()
-        if self.cfg.bridge.mode == "sim":
-            # Gerçek oyuna özel (real_only) senaryolar simülatörün dünyasında çalışamaz
-            scenarios = [s for s in scenarios if "real_only" not in (s.get("tags") or [])]
-        return select(self.cfg, changed_files, scenarios)
+        return select(self.cfg, changed_files, self.runnable_scenarios())
 
     def run_affected(self, changed_files: list[str] | None = None, base: str = "HEAD",
                      seed: int | None = None, dry_run: bool = False) -> dict[str, Any]:

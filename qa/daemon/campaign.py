@@ -54,7 +54,7 @@ def run_campaign(ctx: "JobContext", systems: list[str] | None = None, explore: b
         if unknown:
             raise ValueError(f"Katalogda olmayan sistem: {sorted(unknown)}")
         catalog = [s for s in catalog if s["id"] in systems]
-    scenarios = d.service.list_scenarios()
+    scenarios = d.service.runnable_scenarios()
     do_explore = d.llm_available() if explore is None else (explore and d.llm_available())
     cid = d.db.create_campaign(ctx.job_id)
     ctx.progress(campaign_id=cid, total=len(catalog), done=0)

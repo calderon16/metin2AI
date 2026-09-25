@@ -129,7 +129,7 @@ def execute(ctx: JobContext, job_type: str) -> dict[str, Any]:
         return {"run_id": rep["run_id"], "result": rep["result"], "summary": rep["summary"]}
     if job_type in ("suite", "affected"):
         if job_type == "suite":
-            names = [s["name"] for s in d.service.list_scenarios(p.get("tag")) if "error" not in s]
+            names = [s["name"] for s in d.service.runnable_scenarios(p.get("tag")) if "error" not in s]
             sel = None
         else:
             sel = d.service.select_affected(p.get("files"), p.get("base", "HEAD"))

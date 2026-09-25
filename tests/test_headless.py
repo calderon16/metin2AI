@@ -199,3 +199,17 @@ def test_daemon_with_headless_agents(server, prof, cfg, tmp_path):
         assert server.world.stats["logins"] == 2                # ajanlar işler arasında yeniden login olmadı
     finally:
         d.shutdown()
+
+
+def test_bulk_jobs_only_pick_scenarios_for_the_bridge_mode(cfg):
+    from qa.service import QaService
+
+    names = lambda: {s["name"] for s in QaService(cfg).runnable_scenarios()}  # noqa: E731
+    cfg.bridge.mode = "sim"
+    assert "smoke_login_walk" in names() and "real_quest_s1_1" not in names()
+    cfg.bridge.mode = "headless"
+    got = names()
+    assert "real_smoke_login_walk" in got and "smoke_login_walk" not in got
+    assert "real_quest_s1_1" not in got        # needs_client: görev penceresi ister
+    cfg.bridge.mode = "tcp"
+    assert "real_quest_s1_1" in names()
