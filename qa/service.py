@@ -124,13 +124,20 @@ class QaService:
         e = self.cfg.explorer
         if provider is None:
             provider = make_provider(e.provider, model or e.model, api_key_env=e.api_key_env,
-                                     temperature=e.temperature)
+                                     temperature=e.temperature, thinking_budget=e.thinking_budget)
         budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
                                history_turns=e.history_turns)
         out = AutoExplorer(self.cfg, self.store, provider, self.factory).run(
             goal, budget=budget, account=account, seed=seed, setup=setup, save_as_scenario=save_as_scenario,
             validate=validate)
         return out.to_dict()
+
+    def llm_usage(self, days: int = 30) -> dict[str, Any]:
+        """LLM bütçe durumu (bugün/bu ay, tavanlar) ve günlük kullanım geçmişi."""
+        from .planner.budget import LLMBudget
+
+        b = LLMBudget(self.store, self.cfg.explorer)
+        return {**b.status(), "daily": b.daily(days)}
 
     def replay_failure(self, run_id: str, times: int = 3) -> dict[str, Any]:
         return replay_run(self.runner, run_id, times)

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from ..planner.budget import BudgetExceeded
 from ..store.db import utcnow
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -78,16 +79,21 @@ def run_campaign(ctx: "JobContext", systems: list[str] | None = None, explore: b
             exp = None
             if do_explore and sys["explore"] and sys["agents"] <= 1:
                 ctx.check_cancel()
+                blocked = d.llm_budget().blocked_reason()
                 try:
+                    if blocked:
+                        raise BudgetExceeded(blocked)
                     out = ctx.explore(sys["explore"], max_steps=explore_steps, system=sys["id"])
                     serious = [f for f in out.get("findings", []) if f.get("severity") in SERIOUS]
                     exp = {"run_id": out["run_id"], "result": out["result"], "findings": len(out.get("findings", [])),
                            "serious": len(serious), "stop_reason": out.get("stop_reason"),
                            "summary": out.get("agent_summary")}
+                except BudgetExceeded as e:  # bütçe doldu: keşif atlanır, hata sayılmaz
+                    exp = {"skipped": str(e)}
                 except Exception as e:  # keşif hatası kampanyayı durdurmasın
                     exp = {"error": f"{type(e).__name__}: {e}"}
             results = [r["result"] for r in runs]
-            if not runs and not exp:
+            if not runs and (not exp or exp.get("skipped")):
                 status = "untested"
             elif "FAILED" in results:
                 status = "failed"

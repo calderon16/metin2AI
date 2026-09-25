@@ -74,6 +74,7 @@ class Api:
         r("GET", r"/api/scenarios", lambda q, b: self.d.service.list_scenarios(q.get("tag")))
         r("GET", r"/api/scenarios/(?P<name>[\w\-]+)", self.get_scenario)
         r("GET", r"/api/schedules", lambda q, b: self.d.scheduler.status())
+        r("GET", r"/api/llm-usage", lambda q, b: self.d.service.llm_usage(int(q.get("days", 30))))
 
     def _route(self, method: str, pattern: str, fn: Callable[..., Any]) -> None:
         self.routes.append((method, re.compile(f"^{pattern}$"), fn))

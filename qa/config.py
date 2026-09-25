@@ -99,8 +99,23 @@ class ExplorerConfig:
     api_key_env: str = "GEMINI_API_KEY"
     temperature: float = 0.4
     max_steps: int = 60
-    max_total_tokens: int | None = 2_000_000
-    history_turns: int = 30
+    max_total_tokens: int | None = 600_000
+    # Bağlamda tutulan son tur sayısı (az = ucuz; eski turlar yerine düzenli ilerleme özeti gider)
+    history_turns: int = 10
+    # "Düşünme" token bütçesi (çıktı olarak faturalanır). None: modelin varsayılanı, 0: kapalı
+    thinking_budget: int | None = None
+
+    # --- Bütçe koruması (tüm keşifler için ortak; kullanım SQLite'ta tutulur) ---
+    # Ücretsiz katman (Google AI Studio): maliyet $0 sayılır, sınırlayıcı olan günlük istek kotasıdır
+    free_tier: bool = True
+    requests_per_minute: float = 10.0          # hız sınırı (ücretsiz katman RPM'sinin altında kalın); 0 = yok
+    daily_request_limit: int | None = 900       # günlük istek tavanı (ücretsiz kotanın biraz altında)
+    daily_token_limit: int | None = None
+    monthly_cost_limit_usd: float | None = 5.0  # yalnızca free_tier = false iken
+    # Fiyatlar ($ / 1M token) — modelinize göre güncelleyin (varsayılan: Gemini 2.5 Flash-Lite ücretli fiyatı)
+    price_input_per_m: float = 0.10
+    price_output_per_m: float = 0.40
+    price_cached_per_m: float = 0.025
 
 
 def _default_daemon_agents() -> list[dict[str, Any]]:

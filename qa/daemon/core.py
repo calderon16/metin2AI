@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import QaConfig
 from ..planner.llm import LLMProvider, make_provider
@@ -17,6 +17,9 @@ from .db import DaemonDB
 from .findings import FindingStore
 from .jobs import JobManager
 from .scheduler import Scheduler
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..planner.budget import LLMBudget
 
 
 class Daemon:
@@ -44,7 +47,13 @@ class Daemon:
         if self._llm_factory is not None:
             return self._llm_factory()
         e = self.cfg.explorer
-        return make_provider(e.provider, e.model, api_key_env=e.api_key_env, temperature=e.temperature)
+        return make_provider(e.provider, e.model, api_key_env=e.api_key_env, temperature=e.temperature,
+                             thinking_budget=e.thinking_budget)
+
+    def llm_budget(self) -> "LLMBudget":
+        from ..planner.budget import LLMBudget
+
+        return LLMBudget(self.store, self.cfg.explorer)
 
     def catalog(self) -> list[dict[str, Any]]:
         return load_catalog(self.cfg.resolve(self.cfg.daemon.catalog))
@@ -90,7 +99,7 @@ class Daemon:
                      "running": sum(j["status"] == "running" for j in jobs)},
             "findings": self.findings.counts(),
             "llm": {"available": self.llm_available(), "provider": self.cfg.explorer.provider,
-                    "model": self.cfg.explorer.model},
+                    "model": self.cfg.explorer.model, "budget": self.llm_budget().status()},
             "last_campaign": last_campaign[0] if last_campaign else None,
             "workers": self.jobs.workers,
         }

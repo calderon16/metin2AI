@@ -29,11 +29,20 @@ from ..scenario.schema import SETUP_OPS
 from ..session import BridgeFactory
 from ..store.db import Store
 from .explore import ExplorationManager, suggest_checklist
+from .budget import BudgetedProvider, BudgetExceeded, LLMBudget
 from .llm import LLMError, LLMProvider, Message, ToolCall, ToolResult, ToolSpec
 
 META_TOOLS = {"observe", "check", "qa_setup", "report_finding", "finish"}
-# Çok oyunculu behaviour'lar tek ajanlı keşifte anlamsız
-EXCLUDED_BEHAVIOURS = {"trade_with", "party_invite", "party_kick"}
+# LLM'e gösterilmeyen ince ayar parametreleri (varsayılanları kullanılır) — her istekte tekrar gönderilen
+# araç tanımlarını küçültür
+HIDDEN_PARAMS = {"timeout_ms", "search_radius", "radius", "potion_below_pct", "potion_vnum", "auto_potion",
+                 "required", "tolerance", "range", "use_skill", "match"}
+NOISY_EVENTS = {"damage_dealt", "damage_taken"}
+# Tek ajanlı keşifte işe yaramayanlar (çok oyunculu aksiyonlar, modelin göremediği ekran görüntüsü) —
+# her istekte gönderilen araç listesini kısa tutar
+EXCLUDED_BEHAVIOURS = {"trade_with", "trade_add_item", "trade_set_gold", "trade_accept", "trade_cancel",
+                       "party_invite", "party_kick", "party_accept", "party_decline", "party_leave",
+                       "screenshot", "wait_for_event"}
 
 SYSTEM_PROMPT = """Sen bir Metin2 QA mühendisisin. Gerçek bir QA karakterini (AI_QA_*) oyunda oynatarak
 verilen sistemi test ediyor ve hata arıyorsun. Türkçe düşün ve raporla.
@@ -76,17 +85,17 @@ def behaviour_tools() -> list[ToolSpec]:
         props: dict[str, Any] = {}
         required = []
         for p in b.params:
+            if p.name in HIDDEN_PARAMS:
+                continue
             sch = _param_schema(p.annotation)
             if sch is None:
                 continue
-            if p.default is not inspect.Parameter.empty:
-                sch["description"] = f"varsayılan: {p.default}"
-            else:
+            if p.default is inspect.Parameter.empty:
                 required.append(p.name)
             props[p.name] = sch
-        props["expect_error"] = {"type": "string",
-                                 "description": "Bu adımın bu hata koduyla REDDEDİLMESİ bekleniyorsa (ör. NOT_ENOUGH_GOLD)"}
-        tools.append(ToolSpec(name, b.doc or name, {"type": "object", "properties": props, "required": required}))
+        props["expect_error"] = {"type": "string", "description": "beklenen red kodu"}
+        doc = (b.doc or name).split("\n")[0].strip()
+        tools.append(ToolSpec(name, doc, {"type": "object", "properties": props, "required": required}))
     return tools
 
 
@@ -116,24 +125,73 @@ def meta_tools() -> list[ToolSpec]:
     ]
 
 
-def _compact(obj: Any, limit: int = 3500) -> Any:
+def _compact(obj: Any, limit: int = 1500) -> Any:
     s = json.dumps(obj, ensure_ascii=False, default=str)
     if len(s) <= limit:
         return obj
     return {"truncated": True, "json": s[:limit] + "…"}
 
 
+def _prune(d: dict[str, Any]) -> dict[str, Any]:
+    """Boş/None alanları at: model için anlam taşımaz, token harcar."""
+    return {k: v for k, v in d.items() if v not in (None, [], {}, "")}
+
+
+def _mini_state(st: dict[str, Any]) -> dict[str, Any]:
+    return _prune({k: st.get(k) for k in ("hp", "max_hp", "gold", "level", "x", "y", "dead")})
+
+
+def _events_view(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hasar olaylarını sayıya indir, diğer olayları (ölüm, drop, pencere ...) olduğu gibi bırak."""
+    counts: dict[str, int] = {}
+    kept = []
+    for e in events:
+        if e["event"] in NOISY_EVENTS:
+            counts[e["event"]] = counts.get(e["event"], 0) + 1
+        else:
+            kept.append({"event": e["event"], **(e.get("data") or {})})
+    return _prune({"events": kept[-8:], "counts": counts})
+
+
+def _entities_view(rows: list[dict[str, Any]], n: int = 12) -> list[list[Any]]:
+    """[vid, tür, vnum, ad, mesafe] — anahtar tekrarı olmadan"""
+    return [[r["vid"], r["type"], r["vnum"], r.get("name", ""), r.get("distance")] for r in rows[:n]]
+
+
+def _observe_view(o: dict[str, Any]) -> dict[str, Any]:
+    inv = o.get("inventory") or {}
+    return _prune({
+        "state": _mini_state(o.get("state") or {}),
+        "inventory": [f"{i['vnum']}x{i['count']}@{i['slot']}" for i in inv.get("items", [])],
+        "equipment": {k: v["vnum"] for k, v in (inv.get("equipment") or {}).items()},
+        "quests": o.get("quests"),
+        "windows": {k: _prune({"options": w.get("options"), "items": [i["vnum"] for i in w.get("items", [])]})
+                    for k, w in (o.get("windows") or {}).items()},
+        "nearby[vid,tür,vnum,ad,mesafe]": _entities_view(o.get("nearby") or []),
+        "messages": [m["text"] for m in (o.get("messages") or [])[-5:]],
+    })
+
+
+def _check_view(r: dict[str, Any]) -> dict[str, Any]:
+    return {"passed": r.get("passed"), "results": [
+        _prune({"name": a.get("name"), "passed": a.get("passed"), "expected": a.get("expected"),
+                "actual": None if a.get("passed") else a.get("actual")}) for a in r.get("results", [])]}
+
+
 def _step_view(r: dict[str, Any]) -> dict[str, Any]:
-    """Adım sonucunu LLM için özetle."""
-    out = {k: r.get(k) for k in ("step", "status", "result", "error", "diff", "new_server_errors",
-                                  "new_qa_assert_failures", "game_time_ms")}
-    out["failures"] = [{k: f.get(k) for k in ("kind", "name", "expected", "actual", "message")}
-                       for f in r.get("failures", [])]
-    out["client_events"] = r.get("client_events", [])[-12:]
-    st = r.get("state") or {}
-    out["state"] = {k: st.get(k) for k in ("hp", "max_hp", "sp", "gold", "level", "exp", "x", "y", "dead")}
-    out["windows"] = [w.get("name") for w in r.get("windows", {}).values()] if isinstance(r.get("windows"), dict) \
-        else r.get("windows")
+    """Adım sonucunu LLM için özetle (yalnızca karar vermek için gerekenler)."""
+    out = _prune({k: r.get(k) for k in ("step", "status", "result", "error", "diff", "new_server_errors",
+                                         "new_qa_assert_failures")})
+    fails = [_prune({k: f.get(k) for k in ("kind", "name", "expected", "actual", "message")})
+             for f in r.get("failures", [])]
+    if fails:
+        out["failures"] = fails
+    out.update(_events_view(r.get("client_events", [])))
+    out["state"] = _mini_state(r.get("state") or {})
+    windows = r.get("windows")
+    names = list(windows) if isinstance(windows, dict) else [w.get("name") for w in windows or []]
+    if names:
+        out["windows"] = names
     return out
 
 
@@ -142,7 +200,7 @@ class ExploreBudget:
     max_steps: int = 60
     max_turns: int | None = None             # varsayılan: max_steps * 2 + 10
     max_total_tokens: int | None = None
-    history_turns: int = 30                  # bağlamda tutulan son tur sayısı
+    history_turns: int = 10                  # bağlamda tutulan son tur sayısı
     max_idle_turns: int = 2                  # tool çağırmayan ardışık tur sınırı
 
 
@@ -166,7 +224,10 @@ class ExploreOutcome:
 
 class AutoExplorer:
     def __init__(self, cfg: QaConfig, store: Store, provider: LLMProvider, factory: BridgeFactory | None = None):
-        self.cfg, self.store, self.provider = cfg, store, provider
+        self.cfg, self.store = cfg, store
+        # Her çağrı bütçeden geçer: günlük/aylık tavan, hız sınırı ve kullanım kaydı
+        self.budget = LLMBudget(store, cfg.explorer)
+        self.provider = BudgetedProvider(provider, self.budget)
         self.factory = factory or BridgeFactory(cfg)
         self.explorer = ExplorationManager(cfg, store, self.factory)
 
@@ -175,10 +236,12 @@ class AutoExplorer:
             validate: bool = True) -> ExploreOutcome:
         b = budget or ExploreBudget()
         max_turns = b.max_turns or b.max_steps * 2 + 10
+        self.budget.check()  # bütçe dolmuşsa oyuna hiç girme
         start = self.explorer.start(goal, account, seed, setup)
         if not start["ok"]:
             return ExploreOutcome(start["run_id"], "ERROR", start["error"], "start_failed")
         run_id = start["run_id"]
+        self.provider.run_id = run_id
         rs = self.explorer.sessions[run_id]["rs"]
         transcript = rs.artifacts.path("llm_transcript.jsonl").open("w", encoding="utf-8")
 
@@ -189,12 +252,12 @@ class AutoExplorer:
             f"TEST HEDEFİ:\n{goal}\n\nFikir listesi (edge-case'ler):\n"
             + yaml.safe_dump(suggest_checklist(goal), allow_unicode=True, sort_keys=False)
             + "\nBaşlangıç durumu:\n"
-            + json.dumps(_compact({k: start[k] for k in ("seed", "account", "state", "inventory", "nearby")}, 6000),
-                         ensure_ascii=False)
+            + json.dumps(_observe_view({"state": start["state"], "inventory": start["inventory"],
+                                        "nearby": start["nearby"]}), ensure_ascii=False)
             + "\n\nPlanını kısaca düşün, sonra tool çağrılarıyla test etmeye başla."))
         history: list[Message] = [first]
         findings: list[dict[str, Any]] = []
-        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
         steps = turns = idle = 0
         stop_reason, agent_summary = "max_turns", ""
         error: str | None = None
@@ -204,6 +267,10 @@ class AutoExplorer:
                 turns += 1
                 try:
                     reply = self.provider.chat(system, history, tools)
+                except BudgetExceeded as e:
+                    # Planlı durma: o ana kadar yapılanlar raporlanır, run hata sayılmaz
+                    stop_reason, agent_summary = "budget_exhausted", agent_summary or str(e)
+                    break
                 except LLMError as e:
                     error, stop_reason = str(e), "llm_error"
                     break
@@ -260,9 +327,12 @@ class AutoExplorer:
         finally:
             transcript.close()
 
+        list_cost = round(self.budget.price(usage), 4)
         extra = {"agent_summary": agent_summary, "stop_reason": stop_reason,
                  "llm": {"provider": self.provider.name, "model": self.provider.model, "usage": usage,
-                         "turns": turns, "steps": steps},
+                         "turns": turns, "steps": steps, "free_tier": self.cfg.explorer.free_tier,
+                         "cost_usd": 0.0 if self.cfg.explorer.free_tier else list_cost,
+                         "list_cost_usd": list_cost},
                  "evidence_llm_transcript": "llm_transcript.jsonl"}
         if error:
             rs.fail_infra(f"LLM hatası: {error}")
@@ -283,12 +353,12 @@ class AutoExplorer:
             if call.name not in tool_names:
                 return {"ok": False, "error": f"Bilinmeyen tool: {call.name}"}
             if call.name == "observe":
-                return self.explorer.observe(run_id)
+                return _observe_view(self.explorer.observe(run_id))
             if call.name == "check":
                 asserts = yaml.safe_load(args.get("asserts") or "[]")
                 if not isinstance(asserts, list):
                     asserts = [asserts]
-                return self.explorer.check(run_id, asserts)
+                return _check_view(self.explorer.check(run_id, asserts))
             if call.name == "qa_setup":
                 ops = yaml.safe_load(args.get("ops") or "[]")
                 return self.explorer.setup_more(run_id, ops if isinstance(ops, list) else [ops])

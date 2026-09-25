@@ -188,6 +188,10 @@ class JobManager:
             load_scenario(self.daemon.cfg.scenarios_path, params["name"])  # yoksa hata
         if job_type == "explore" and not self.daemon.llm_available():
             raise ValueError(f"LLM anahtarı yok: {self.daemon.cfg.explorer.api_key_env} ortam değişkenini ayarlayın")
+        if job_type == "explore":
+            blocked = self.daemon.llm_budget().blocked_reason()
+            if blocked:
+                raise ValueError(f"{blocked} — keşif yarın (ya da tavan yükseltilince) çalıştırılabilir")
 
     def submit(self, job_type: str, params: dict[str, Any] | None = None, source: str = "api",
                priority: int = 0) -> int:

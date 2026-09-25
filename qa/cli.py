@@ -204,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("run_id")
     p.add_argument("--trace", action="store_true")
     sub.add_parser("reference", help="Behaviour/assertion referansı")
+    p = sub.add_parser("llm-usage", help="LLM bütçesi: bugün/bu ay kullanım, tavanlar, günlük geçmiş")
+    p.add_argument("--days", type=int, default=14)
     p = sub.add_parser("sim-server", help="Simülatörü TCP'de sun")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("mcp", help="MCP sunucusunu stdio'da başlat")
@@ -306,6 +308,20 @@ def main(argv: list[str] | None = None) -> int:
             print(s.get_trace(a.run_id, 0))
         else:
             _print(s.get_test_result(a.run_id))
+        return 0
+    if a.cmd == "llm-usage":
+        u = s.llm_usage(a.days)
+        t, m, lim = u["today"], u["month"], u["limits"]
+        tier = "ücretsiz katman" if u["free_tier"] else "ücretli"
+        print(f"Bugün : {t['requests']} istek / {lim['daily_requests'] or '∞'} · {t['total_tokens']:,} token "
+              f"({t['cached_tokens']:,} önbellekten) · ${t['cost_usd']:.4f} ({tier}; ücretli olsaydı ${t['list_cost_usd']:.4f})")
+        print(f"Bu ay: {m['requests']} istek · {m['total_tokens']:,} token · ${m['cost_usd']:.4f} "
+              f"(ücretli olsaydı ${m['list_cost_usd']:.4f})")
+        if u["blocked"]:
+            print(f"DURDU: {u['blocked']}")
+        for d in u["daily"]:
+            print(f"  {d['day']}  {d['requests']:5} istek  {d['input_tokens'] + d['output_tokens']:>12,} token  "
+                  f"${d['cost_usd']:.4f} (liste ${d['list_cost_usd']:.4f})")
         return 0
     if a.cmd == "reference":
         _print(s.reference())

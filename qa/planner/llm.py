@@ -94,7 +94,8 @@ class GeminiProvider:
 
     def __init__(self, model: str, api_key: str | None = None, api_key_env: str = "GEMINI_API_KEY",
                  base_url: str = GEMINI_BASE_URL, temperature: float = 0.4, timeout_s: float = 120.0,
-                 max_retries: int = 4, opener: Callable[..., Any] | None = None):
+                 max_retries: int = 4, opener: Callable[..., Any] | None = None,
+                 thinking_budget: int | None = None):
         key = api_key or os.environ.get(api_key_env) or os.environ.get("GOOGLE_API_KEY")
         if not key:
             raise LLMError(f"Gemini API anahtarı yok: {api_key_env} ortam değişkenini ayarlayın")
@@ -104,6 +105,7 @@ class GeminiProvider:
         self.temperature = temperature
         self.timeout_s = timeout_s
         self.max_retries = max_retries
+        self.thinking_budget = thinking_budget
         self._open = opener or urllib.request.urlopen
 
     # -- dönüştürme
@@ -158,6 +160,9 @@ class GeminiProvider:
             "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
             "generationConfig": {"temperature": self.temperature},
         }
+        if self.thinking_budget is not None:
+            # "Düşünme" token'ları çıktı olarak faturalanır; sınırlamak maliyeti düşürür (0 = kapalı)
+            body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": int(self.thinking_budget)}
         data = self._request(body)
         cands = data.get("candidates") or []
         if not cands:
@@ -174,7 +179,10 @@ class GeminiProvider:
                 fc = part["functionCall"]
                 calls.append(ToolCall(fc.get("name", ""), fc.get("args") or {}, fc.get("id", "")))
         u = data.get("usageMetadata", {})
-        usage = {"input_tokens": u.get("promptTokenCount", 0), "output_tokens": u.get("candidatesTokenCount", 0),
+        # Düşünme token'ları çıktı gibi faturalanır; önbellekten okunan girdi token'ları daha ucuzdur
+        usage = {"input_tokens": u.get("promptTokenCount", 0),
+                 "output_tokens": u.get("candidatesTokenCount", 0) + u.get("thoughtsTokenCount", 0),
+                 "cached_tokens": u.get("cachedContentTokenCount", 0),
                  "total_tokens": u.get("totalTokenCount", 0)}
         return LLMReply(Message("assistant", "\n".join(text), calls, raw=content), usage, cand.get("finishReason"))
 
@@ -195,6 +203,8 @@ class ScriptedProvider:
         self.script = script
         self.turn = 0
         self.seen: list[list[Message]] = []
+        # Testlerde bütçe/maliyet hesabını sınamak için her çağrının "kullanımı"
+        self.usage_per_call = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
 
     def chat(self, system: str, messages: list[Message], tools: list[ToolSpec]) -> LLMReply:
         self.seen.append(list(messages))
@@ -207,10 +217,11 @@ class ScriptedProvider:
         else:
             calls = []
         self.turn += 1
-        return LLMReply(Message("assistant", "", calls), {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+        return LLMReply(Message("assistant", "", calls), dict(self.usage_per_call))
 
 
 def make_provider(provider: str, model: str | None = None, **kw: Any) -> LLMProvider:
     if provider == "gemini":
-        return GeminiProvider(model or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash", **kw)
+        # Varsayılan: en ucuz ve ücretsiz katmanda bulunan model
+        return GeminiProvider(model or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite", **kw)
     raise LLMError(f"Bilinmeyen LLM sağlayıcı: {provider} (mevcut: gemini)")
