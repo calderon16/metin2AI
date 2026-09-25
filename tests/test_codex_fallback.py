@@ -64,8 +64,9 @@ def test_budget_records_fallback_as_codex(service):
 def test_codex_cli_uses_read_only_isolated_process_and_validates_tools(monkeypatch):
     seen = {}
 
-    def fake_run(command, *, input, text, capture_output, timeout, cwd, env, check):
+    def fake_run(command, *, input, text, encoding, capture_output, timeout, cwd, env, check):
         seen.update(command=command, input=input, cwd=cwd, env=env)
+        assert encoding == "utf-8"
         output = command[command.index("-o") + 1]
         with open(output, "w", encoding="utf-8") as f:
             json.dump({"text": "", "tool_calls": [{"name": "observe", "args_json": "{}"}]}, f)

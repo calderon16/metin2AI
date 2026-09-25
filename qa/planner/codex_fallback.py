@@ -57,7 +57,7 @@ class CodexCliProvider:
                        "--sandbox", "read-only", "--skip-git-repo-check", "-C", str(root),
                        "--output-schema", str(schema), "-o", str(output), "-"]
             try:
-                result = subprocess.run(command, input=prompt, text=True, capture_output=True,
+                result = subprocess.run(command, input=prompt, text=True, encoding="utf-8", capture_output=True,
                                         timeout=self.timeout_s, cwd=str(root), env=env, check=False)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise LLMError(f"Codex CLI çalıştırılamadı: {exc}") from exc
