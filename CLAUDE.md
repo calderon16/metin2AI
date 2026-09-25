@@ -22,6 +22,9 @@ düzelt → tekrar çalıştır → `replay_failure(eski_run)` ile düzeltmeyi d
 geliştirdiğinde onun senaryosunu da `write_scenario` ile ekle.
 
 ## Otonom keşif (Gemini)
+Gemini günlük kotası biterse `[explorer] fallback_provider = "codex_cli"` ile yerel Codex CLI
+devralır. Bunun için Windows'ta ayrı `codex login --device-auth` oturumu gerekir. Codex'e yalnız
+izinli QA araçlarını önerme yetkisi verilir; oyun eylemleri aynı yürütücüden geçer.
 LLM istek/token/maliyet durumunu `metin2-qa llm-usage` ile kontrol et. Bütçe doluysa
 keşif başlatma; `qa.toml` veya yerel dosyanın yalnız `[explorer]` bölümünü düzenle.
 `metin2-qa explore` / MCP `explore_autonomous`. Anahtar `GEMINI_API_KEY` ortam değişkeninde; asla dosyaya

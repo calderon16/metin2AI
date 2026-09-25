@@ -61,6 +61,7 @@ error_patterns = ["SYSERR", "Traceback", "QUEST_ERROR", "SQL error"]
 [explorer]
 # Otonom keşif ajanı. API anahtarı BURAYA YAZILMAZ: api_key_env'deki ortam değişkeninden okunur.
 provider = "gemini"
+fallback_provider = "codex_cli"   # Gemini günlük kotası dolunca yerel Codex CLI; ayrı oturum gerekir
 model = "gemini-2.5-flash-lite"     # keşif modeli
 api_key_env = "GEMINI_API_KEY"
 temperature = 0.4

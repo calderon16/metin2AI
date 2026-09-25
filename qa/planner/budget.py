@@ -150,8 +150,14 @@ class BudgetedProvider:
         self.inner = inner
         self.budget = budget
         self.run_id = run_id
-        self.name = inner.name
-        self.model = inner.model
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    @property
+    def model(self) -> str:
+        return self.inner.model
 
     def _rate_limit(self) -> None:
         rpm = self.budget.cfg.requests_per_minute
