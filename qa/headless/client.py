@@ -28,7 +28,7 @@ from ..bridge.protocol import PROTOCOL_VERSION, err, ok
 from ..config import HeadlessConfig
 from ..sim.png import SIZE, encode_png
 from .bindings import Bindings
-from .crypto import make_crypto
+from .crypto import ImprovedKeyAgreement, KeyAgreementError, make_crypto
 from .net import Packet, PacketConnection, ProtocolError
 from .profile import Profile, ProfileError
 
@@ -91,6 +91,8 @@ class HeadlessClient:
         self.dead = False
         self._pending: list[dict[str, Any]] = []
         self._auth_result: dict[str, Any] | None = None
+        self._char_index: int | None = None
+        self._pending_warp: tuple[int, int, int] | None = None   # (port, x, y)
 
     def now_ms(self) -> int:
         return int((time.monotonic() - self._t0) * 1000)
@@ -145,6 +147,7 @@ class HeadlessClient:
     # ------------------------------------------------------------------ paket pompası
     def _connect(self, host: str, port: int) -> PacketConnection:
         conn = PacketConnection(self.profile, host, port, self.cfg.timeout_s, make_crypto(self.cfg.crypto), log=self.log)
+        conn.flag_sized = self.b.flag_sized()
         conn.connect()
         return conn
 
@@ -162,6 +165,10 @@ class HeadlessClient:
             step = min(max(left, 0.0), 0.05)
             for p in self.conn.poll(step):
                 self._on_packet(p)
+                if self._pending_warp is not None:
+                    break      # warp'tan sonraki paketler eski çekirdekten; yeni bağlantıda yeniden gelir
+            if self._pending_warp is not None:
+                self._do_warp()
             if left <= 0:
                 break
 
@@ -190,6 +197,11 @@ class HeadlessClient:
             first = self.profile.structs[self.profile.resolve(self.profile.struct_for(h))].fields[0].name
             vals.pop(first, None)
             self.conn.send(h, vals)
+        elif logical == "warp":
+            self._pending_warp = (int(g("port", 0)), int(g("x", 0)), int(g("y", 0)))
+            self.log(f"warp → port {self._pending_warp[0]} ({self._pending_warp[1]}, {self._pending_warp[2]})")
+        elif logical == "key_agreement":
+            self._on_key_agreement(g)
         elif logical == "ping":
             self._send("ping") if self.b.supports("ping") else None
         elif logical == "phase":
@@ -269,6 +281,70 @@ class HeadlessClient:
                 self.log(f"chat: {text}")
         elif logical == "script":
             self._on_script(p.trailing)
+
+    def _do_warp(self) -> None:
+        """Yeni çekirdeğe bağlan ve aynı karakterle doğrudan oyuna gir (gerçek istemcinin DirectEnter akışı)."""
+        port, x, y = self._pending_warp or (0, 0, 0)
+        self._pending_warp = None
+        if self.account is None or self.login_key is None or self._char_index is None:
+            raise HeadlessError("WARP_FAILED", "Warp için oturum bilgisi yok")
+        self._drop_connection()
+        self.phase, self.characters = None, []
+        self.me.update(vid=None, x=float(x), y=float(y))
+        self.chars.clear()
+        self.ground.clear()
+        self.dialog, self.dest, self.target, self.attacking = None, None, None, False
+        self.conn = self._connect(self.cfg.game_host, port)
+        self._enter_game_with_key(self._char_index)
+        self.log(f"warp tamam: {self.me['name']} → port {port}")
+        self.event("map_loaded", map=self._map_index())
+
+    def _enter_game_with_key(self, index: int) -> None:
+        timeout = self.cfg.timeout_s
+        login_phase = self.b.phase("LOGIN")
+        self._pump_until(lambda: login_phase is None or self.phase == login_phase, timeout, "login fazı")
+        self._send("game_login", login=self.account, key=self.login_key)
+        select_phase = self.b.phase("SELECT")
+        self._pump_until(lambda: bool(self.characters) or self.phase == select_phase, timeout, "karakter listesi")
+        self._select_and_enter(index)
+
+    def _select_and_enter(self, index: int) -> None:
+        self._char_index = index
+        self.in_game = False
+        self._send("select", index=index)
+        # Karakter başka çekirdeğin haritasındaysa sunucu hemen GC_WARP gönderir; iç içe _do_warp oyuna
+        # girişi tamamlar (in_game), bu durumda buradaki bekleme de biter.
+        self._pump_until(lambda: self.in_game or self.me["vid"] is not None, self.cfg.timeout_s, "ana karakter")
+        loading = self.b.phase("LOADING")
+        self._pump_until(lambda: self.in_game or loading is None or self.phase == loading, self.cfg.timeout_s,
+                         "yükleme fazı")
+        if self.in_game:
+            return
+        if self.cfg.client_version and self.b.supports("client_version"):
+            self._send("client_version", filename="metin2_qa_headless", timestamp=str(self.cfg.client_version))
+        self._send("enter_game")
+        game = self.b.phase("GAME")
+        self._pump_until(lambda: game is None or self.phase == game, self.cfg.timeout_s, "oyun fazı")
+        self.in_game = True
+        self._pump(300)  # etraftaki karakter/item paketleri gelsin
+
+    def _on_key_agreement(self, g: Callable[..., Any]) -> None:
+        """_IMPROVED_PACKET_ENCRYPTION_: sunucunun DH2 açık anahtarlarına kendi anahtarlarımızla (düz) cevap ver;
+        HEADER_GC_KEY_AGREEMENT_COMPLETED'dan sonra iki yön de şifreli."""
+        if self.cfg.crypto != "improved":
+            raise ProtocolError("Sunucu geliştirilmiş paket şifrelemesi istiyor (KEY_AGREEMENT); "
+                                "[headless] crypto = \"improved\" ayarlayın")
+        agreed, length = int(g("agreed", 0)), int(g("length", 0))
+        peer = bytes(g("data", []) or [])[:length]
+        ka = ImprovedKeyAgreement()
+        try:
+            crypto = ka.agree(agreed, peer)
+        except KeyAgreementError as e:
+            raise ProtocolError(f"Anahtar anlaşması başarısız: {e}") from e
+        h = self.b.cg("key_agreement")
+        self.conn.send(h, self.b.values("key_agreement", h, agreed=agreed, length=len(ka.data), data=ka.data))
+        self.conn.switch_crypto_after(self.b.gc("key_agreement_completed"), crypto)
+        self.log(f"anahtar anlaşması: gönderim {crypto.algorithms[1]}, alım {crypto.algorithms[0]}")
 
     def _on_dead(self, vid: int | None) -> None:
         if vid == self.me["vid"]:
@@ -495,15 +571,7 @@ class HeadlessClient:
                 raise HeadlessError("NO_CHARACTER", f"'{name}' karakteri yok")
             index = match[0]["index"]
         index = int(index or 0)
-        self._send("select", index=index)
-        self._pump_until(lambda: self.me["vid"] is not None, self.cfg.timeout_s, "ana karakter")
-        loading = self.b.phase("LOADING")
-        self._pump_until(lambda: loading is None or self.phase == loading, self.cfg.timeout_s, "yükleme fazı")
-        self._send("enter_game")
-        game = self.b.phase("GAME")
-        self._pump_until(lambda: game is None or self.phase == game, self.cfg.timeout_s, "oyun fazı")
-        self.in_game = True
-        self._pump(300)  # etraftaki karakter/item paketleri gelsin
+        self._select_and_enter(index)
         self.event("map_loaded", map=self._map_index())
         return {"name": self.me["name"], "map": self._map_index()}
 

@@ -3,6 +3,10 @@
 Profil ne diyorsa o paketleri konuşur (header numaraları, struct'lar, dinamik boyutlar). Minik bir dünya:
 bir oyuncu, bir mob (3 vuruşta ölür, drop bırakır), bir NPC (görev diyaloğu), /qa hazırlık komutları.
 Ayrıca oyuncunun hareketini denetler: tek adımda çok uzağa "ışınlanma" (hız hilesi) ihlal olarak sayılır.
+
+`improved=True`: gerçek sunucudaki gibi handshake'ten sonra DH2 anahtar anlaşması yapar ve
+KEY_AGREEMENT_COMPLETED'dan sonra iki yönü şifreler. Profilde SEQUENCE tablosu varsa gelen her
+SEQUENCE paketinin son baytını denetler (yanlışsa `seq_errors` artar, gerçek sunucu bağlantıyı keser).
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import threading
 import time
 from typing import Any
 
+from .crypto import ImprovedCrypto, ImprovedKeyAgreement
 from .net import PacketConnection, ProtocolError
 from .profile import Profile
 
@@ -25,7 +30,8 @@ class FakeWorld:
     def __init__(self, password: str = "qa"):
         self.password = password
         self.lock = threading.Lock()
-        self.stats = {"moves": 0, "speed_violations": 0, "attacks": 0, "pongs": 0, "logins": 0}
+        self.stats = {"moves": 0, "speed_violations": 0, "attacks": 0, "pongs": 0, "logins": 0,
+                      "key_agreements": 0, "seq_packets": 0, "seq_errors": 0}
 
 
 class _Handler(socketserver.BaseRequestHandler):
@@ -38,6 +44,8 @@ class _Handler(socketserver.BaseRequestHandler):
         self.hp = 3
         self.me = {"x": 5000, "y": 5000, "gold": 0, "hp": 400, "items": {0: [27001, 3]}}
         self.name = ""
+        self.seq_index = 0
+        self.key_agreement: ImprovedKeyAgreement | None = None
 
     def send(self, header: str, **v: Any) -> None:
         self.c.send(header, v)
@@ -59,15 +67,41 @@ class _Handler(socketserver.BaseRequestHandler):
         try:
             while True:
                 for p in self.c.poll(0.2):
+                    if p.seq is not None and not self.check_sequence(p.seq):
+                        return   # gerçek sunucu: "SEQUENCE mismatch" → PHASE_CLOSE
                     self.on_packet(p.name, p.data, p.trailing)
         except ProtocolError:
             pass
+
+    def check_sequence(self, got: int) -> bool:
+        table = self.server.profile.sequence
+        want = table[self.seq_index]
+        self.seq_index = (self.seq_index + 1) % len(table)
+        with self.w.lock:
+            self.w.stats["seq_packets"] += 1
+            if got != want:
+                self.w.stats["seq_errors"] += 1
+        return got == want
 
     def on_packet(self, name: str, d: dict[str, Any], trailing: bytes) -> None:
         auth = self.server.kind == "auth"
         if name == "HEADER_CG_HANDSHAKE":
             if d.get("dwHandshake") == HANDSHAKE:
-                self.phase("PHASE_AUTH" if auth else "PHASE_LOGIN")
+                if self.server.improved:
+                    self.key_agreement = ImprovedKeyAgreement()
+                    data = self.key_agreement.data
+                    self.send("HEADER_GC_KEY_AGREEMENT", wAgreedLength=256, wDataLength=len(data), data=data)
+                else:
+                    self.phase("PHASE_AUTH" if auth else "PHASE_LOGIN")
+        elif name == "HEADER_CG_KEY_AGREEMENT" and self.key_agreement is not None:
+            # önce COMPLETED düz gider, sonra iki yön şifreli (desc.cpp / input.cpp ile aynı sıra)
+            self.send("HEADER_GC_KEY_AGREEMENT_COMPLETED")
+            peer = bytes(d["data"])[:d["wDataLength"]]
+            self.c.crypto = ImprovedCrypto(self.key_agreement.shared(d["wAgreedLength"], peer), polarity=False)
+            self.key_agreement = None
+            with self.w.lock:
+                self.w.stats["key_agreements"] += 1
+            self.phase("PHASE_AUTH" if auth else "PHASE_LOGIN")
         elif name == "HEADER_CG_LOGIN3" and auth:
             if d["passwd"] == self.w.password and d["login"].startswith("AI_QA_"):
                 self.send("HEADER_GC_AUTH_SUCCESS", dwLoginKey=LOGIN_KEY, bResult=1)
@@ -143,6 +177,11 @@ class _Handler(socketserver.BaseRequestHandler):
                 elif cmd == "hp":
                     self.me["hp"] = int(parts[2])
                     self.point(5, self.me["hp"])
+                elif cmd == "warp" and "HEADER_GC_WARP" in self.server.profile.packets:
+                    # başka çekirdeğe geçiş: istemci aynı sunucuya yeniden bağlanıp doğrudan oyuna girer
+                    self.send("HEADER_GC_WARP", lX=6000, lY=6000, lAddr=0x0100007F,
+                              wPort=self.server.server_address[1])
+                    return
                 self.chat(f"[QA] OK {cmd}")
             else:
                 self.chat(f"{self.name} : {msg}", ctype=0)
@@ -152,18 +191,18 @@ class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, kind: str, profile: Profile, world: FakeWorld):
+    def __init__(self, kind: str, profile: Profile, world: FakeWorld, improved: bool = False):
         super().__init__(("127.0.0.1", 0), _Handler)
-        self.kind, self.profile, self.world = kind, profile, world
+        self.kind, self.profile, self.world, self.improved = kind, profile, world, improved
 
 
 class FakeMetin2:
     """auth + game sunucularını thread'lerde başlatır."""
 
-    def __init__(self, profile: Profile, password: str = "qa"):
+    def __init__(self, profile: Profile, password: str = "qa", improved: bool = False):
         self.world = FakeWorld(password)
-        self.auth = _Server("auth", profile, self.world)
-        self.game = _Server("game", profile, self.world)
+        self.auth = _Server("auth", profile, self.world, improved)
+        self.game = _Server("game", profile, self.world, improved)
         for s in (self.auth, self.game):
             threading.Thread(target=s.serve_forever, daemon=True).start()
 

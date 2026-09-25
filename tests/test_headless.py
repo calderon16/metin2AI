@@ -87,8 +87,8 @@ def test_xtea_roundtrip():
     dec = XteaCrypto(bytes(range(16)))
     out = dec.decrypt(enc[:5]) + dec.decrypt(enc[5:])   # parçalı gelse de çözülür
     assert out.rstrip(b"\0") == data
-    with pytest.raises(ValueError, match="kaynak kod"):
-        make_crypto("improved")
+    with pytest.raises(ValueError, match="Desteklenmeyen"):
+        make_crypto("rc4")
 
 
 def test_bindings_overrides(prof):

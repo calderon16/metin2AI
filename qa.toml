@@ -18,6 +18,7 @@ mode = "sim"
 host = "127.0.0.1"
 port = 47800
 timeout_s = 15.0
+client_version = 0                   # CG_CLIENT_VERSION zaman damgası (sunucu CLIENT_VERSION); 0 = gönderme
 
 [bridge.agent_ports]
 # Çoklu ajan (tcp): her ajan ayrı Metin2_QA.exe örneği → ayrı port. Tanımsızsa port + ajan sırası.
@@ -113,7 +114,7 @@ auth_port = 11002
 game_host = "127.0.0.1"
 channel = 1
 profile = "profiles/metin2re.json"   # metin2-qa packets import ... -o profiles/metin2re.json
-crypto = "none"                      # none | xtea (fork'a göre)
+crypto = "none"                      # none | xtea | improved (_IMPROVED_PACKET_ENCRYPTION_)
 timeout_s = 15.0
 walk_speed = 450.0                   # birim/sn — sunucunun hız kontrolüne takılmayacak değer
 move_interval_ms = 250

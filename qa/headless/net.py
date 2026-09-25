@@ -3,6 +3,10 @@
 Gelen (GC) paketlerin boyutu profilden bulunur: statik paket = struct boyutu, dinamik paket =
 header'dan sonraki WORD `size` (header dahil toplam). Bilinmeyen bir header gelirse akış
 senkronunu kaybettiğimiz için bağlantı ProtocolError ile kapatılır (profil/fork uyumsuzluğu).
+
+Şifreleme bağlantı ortasında açılabilir (`switch_crypto_after`): belirtilen paket çözüldüğü anda yeni
+şifreleme hem gönderime hem de o paketten sonra tamponda kalan baytlara uygulanır. Profilde `sequence`
+işaretli paketlerin sonuna sunucunun SEQUENCE tablosundan sıradaki bayt eklenir (bağlantı başına sayaç).
 """
 
 from __future__ import annotations
@@ -22,10 +26,10 @@ class ProtocolError(Exception):
 
 
 class Packet:
-    __slots__ = ("name", "data", "trailing")
+    __slots__ = ("name", "data", "trailing", "seq")
 
-    def __init__(self, name: str, data: dict[str, Any], trailing: bytes = b""):
-        self.name, self.data, self.trailing = name, data, trailing
+    def __init__(self, name: str, data: dict[str, Any], trailing: bytes = b"", seq: int | None = None):
+        self.name, self.data, self.trailing, self.seq = name, data, trailing, seq
 
     def __repr__(self) -> str:  # pragma: no cover - hata ayıklama
         return f"Packet({self.name}, {self.data}, +{len(self.trailing)}B)"
@@ -43,6 +47,15 @@ class PacketConnection:
         self.sock: socket.socket | None = None
         self._buf = b""
         self.bytes_in = self.bytes_out = 0
+        self._seq_index = 0
+        self._pending_crypto: Crypto | None = None
+        self._switch_on: str | None = None
+        # header numarası → {flag_offset, base, fields{bit: bayt}} (bkz. bindings "flag_sized")
+        self.flag_sized: dict[int, dict[str, Any]] = {}
+
+    def switch_crypto_after(self, packet_name: str, crypto: Crypto) -> None:
+        """`packet_name` alındığı anda (ve sonrasında gelen/giden her bayta) `crypto` uygulanır."""
+        self._pending_crypto, self._switch_on = crypto, packet_name
 
     @classmethod
     def from_socket(cls, profile: Profile, sock: socket.socket, direction_in: str, direction_out: str,
@@ -63,6 +76,7 @@ class PacketConnection:
             raise ProtocolError(f"{self.host}:{self.port} bağlanılamadı: {e}") from e
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._buf = b""
+        self._seq_index = 0
         self._log(f"bağlandı {self.host}:{self.port}")
 
     def close(self) -> None:
@@ -90,6 +104,10 @@ class PacketConnection:
         if self.sock is None:
             raise ProtocolError("Bağlı değil")
         raw = self.build(header_name, values, trailing)
+        seq = self.profile.sequence
+        if seq and self.profile.packets.get(header_name, {}).get("sequence"):
+            raw += bytes((seq[self._seq_index],))
+            self._seq_index = (self._seq_index + 1) % len(seq)
         try:
             self.sock.sendall(self.crypto.encrypt(raw))
         except OSError as e:
@@ -132,11 +150,21 @@ class PacketConnection:
         info = self.profile.packets[name]
         if not info.get("struct"):
             raise ProtocolError(f"{name} için struct bilinmiyor — boyut tablosunu profile ekleyin")
+        extra = 1 if self._has_sequence(info) else 0
+        rule = self.flag_sized.get(hv) if self.dir_in == "GC" else None
+        if rule is not None:
+            if len(self._buf) <= rule["flag_offset"]:
+                return None
+            flag = self._buf[rule["flag_offset"]]
+            return rule["base"] + sum(n for bit, n in rule["fields"].items() if flag & bit) + extra
         if info.get("dynamic"):
             if len(self._buf) < 3:
                 return None
-            return struct.unpack_from("<H", self._buf, 1)[0]
-        return self.profile.sizeof(info["struct"])
+            return struct.unpack_from("<H", self._buf, 1)[0] + extra
+        return self.profile.sizeof(info["struct"]) + extra
+
+    def _has_sequence(self, info: dict[str, Any]) -> bool:
+        return bool(self.profile.sequence and info.get("sequence"))
 
     def _complete_available(self) -> bool:
         try:
@@ -155,10 +183,18 @@ class PacketConnection:
                 raise ProtocolError("Geçersiz paket boyutu 0")
             frame, self._buf = self._buf[:n], self._buf[n:]
             name = self.profile.packet_by_value(self.dir_in, frame[0])
+            seq = None
+            if self._has_sequence(self.profile.packets[name]):   # (sunucu tarafı: gelen CG paketinin SEQUENCE baytı)
+                frame, seq = frame[:-1], frame[-1]
             st = self.profile.packets[name]["struct"]
             try:
                 data, off = self.profile.decode(st, frame)
             except ProfileError as e:
                 raise ProtocolError(f"{name} çözülemedi: {e}") from e
-            out.append(Packet(name, data, frame[off:]))
+            out.append(Packet(name, data, frame[off:], seq))
+            if self._pending_crypto is not None and name == self._switch_on:
+                # Bu paketten sonrası şifreli: tamponda kalan (henüz düz sanılan) baytları çöz
+                self.crypto, self._pending_crypto, self._switch_on = self._pending_crypto, None, None
+                self._buf = self.crypto.decrypt(self._buf)
+                self._log(f"şifreleme etkin ({self.crypto.name})")
         return out

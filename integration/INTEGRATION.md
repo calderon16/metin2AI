@@ -29,29 +29,40 @@ Oyun client'ı açmadan, AI oyuncuların sunucu VM'inde 7/24 çalışması için
 (`qa/headless`) auth/game sunucusuna gerçek paketlerle bağlanır. **Client tarafında hiçbir değişiklik
 gerekmez.** Sunucuda yalnızca 2. bölümdeki QA eklentileri (`/qa` hazırlık komutları, QA_EVENT) gerekir.
 
-1. **Paket profili:** fork'un kaynağından üretin (header numaraları, struct'lar, dinamik boyutlar):
+1. **Paket profili:** fork'un kaynağından üretin (header numaraları, struct'lar, dinamik boyutlar). İstemcinin
+   `Packet.h`'ını birincil başlık olarak verin: sunucudan gelen her paketin boyutunu istemci nasıl okuyorsa
+   headless de öyle okumalı. Sunucu tarafı adlar (`packet_info.cpp`) `--value-headers` ile numarayla eşlenir;
+   `--sequence-table` sunucunun SEQUENCE tablosunu profile koyar. Metin2Re'de kullanılan komut:
    ```sh
-   metin2-qa packets import \
-       --packet-h server/common/packet.h \
-       --size-table client/UserInterface/PythonNetworkStream.cpp \
-       --size-table server/game/src/packet_info.cpp \
-       --defines client/UserInterface/Locale_inc.h --defines server/common/service.h \
-       --name metin2re -o profiles/metin2re.json
+   S=../source/metin2/src/server C=../source/ClientVS22/source
+   metin2-qa packets import        --packet-h $S/common/length.h --packet-h $S/common/item_length.h        --packet-h $C/GameLib/ItemData.h --packet-h $C/UserInterface/GameType.h --packet-h $C/UserInterface/Packet.h        --size-table $C/UserInterface/PythonNetworkStream.cpp --size-table $S/game/src/packet_info.cpp        --value-headers $S/common/length.h --value-headers $S/common/item_length.h        --value-headers $S/common/tables.h --value-headers $S/game/src/packet.h        --sequence-table $S/game/src/sequence.cpp        --defines $C/UserInterface/Locale_inc.h --defines $C/EterBase/ServiceDefs.h        --name metin2re -o profiles/metin2re.json
    metin2-qa packets info profiles/metin2re.json
    ```
    `info` çıktısında `YOK` görünen mesajları fork'taki adlarıyla `profiles/metin2re.bindings.yaml` içinde
    eşleyin (bkz. `qa/headless/bindings.py` DEFAULT_BINDINGS).
-2. **Şifreleme:** fork paket şifrelemesi kullanıyorsa `[headless] crypto` ayarlanır. `none` ve deneysel
-   `xtea` hazır. `_IMPROVED_PACKET_ENCRYPTION_` (anahtar anlaşması) fork'un koduna göre eklenecek; test
-   sunucusunda şifreleme kapatılabiliyorsa en hızlı yol budur.
-3. **Ayarlar** (`qa.local.toml`):
+2. **Şifreleme:** fork paket şifrelemesi kullanıyorsa `[headless] crypto` ayarlanır: `none`, deneysel `xtea`
+   ya da `improved` (`_IMPROVED_PACKET_ENCRYPTION_`: DH2 anahtar anlaşması + her yön için Crypto++'ın 14 blok
+   şifresinden biri, CTR). `improved` sunucunun `cipher.cpp`'siyle üretilmiş vektörlerle sınanır
+   (`tools/cryptopp_vectors/`); fork'un `cipher.cpp`'si farklıysa vektörleri yeniden üretin.
+   Klasik kaynağın diğer tuhaflıkları da headless'ta karşılanır:
+   - **SEQUENCE:** `packet_info.cpp`'de `true` işaretli CG paketlerinin sonuna `sequence.cpp` tablosundan
+     sıradaki bayt eklenir (yanlışsa sunucu bağlantıyı keser).
+   - **QUEST_INFO:** sunucu `size` alanını ek alanları yazdıktan sonra artırdığından giden değer hep 6'dır;
+     boyut `flag` bitlerinden hesaplanır (bindings `flag_sized`).
+   - **Sürüm paketi:** `g_bCheckClientVersion` açıksa yükleme fazında `CG_CLIENT_VERSION2` gönderilmezse oyuncu
+     10 sn sonra atılır; `[headless] client_version` sunucunun beklediği zaman damgası olmalı.
+   - **Warp:** karakter başka çekirdeğin haritasındaysa ya da oraya ışınlanırsa `GC_WARP` gelir; headless
+     yeni porta bağlanıp aynı giriş anahtarı ve karakter yuvasıyla doğrudan oyuna girer.
+3. **Ayarlar** (`qa.local.toml`; şifre dosyaya yazılmaz, `QA_ACCOUNT_PASSWORD` ortam değişkeninde):
    ```toml
    [bridge]
    mode = "headless"
    [headless]
    auth_host = "127.0.0.1"
-   auth_port = 11002
+   auth_port = 11000
    profile = "profiles/metin2re.json"
+   crypto = "improved"
+   client_version = 1215955205
    [headless.channels]
    "1" = 13000
    [[headless.maps]]            # konumdan harita numarası (map/<ad>/Setting.txt)
@@ -59,9 +70,9 @@ gerekmez.** Sunucuda yalnızca 2. bölümdeki QA eklentileri (`/qa` hazırlık k
    x = 409600
    y = 896000
    width = 102400
-   height = 102400
+   height = 128000
    ```
-4. **Doğrulama:** `metin2-qa run smoke_login_walk`, sonra `metin2-qa daemon` ile panelden kampanya.
+4. **Doğrulama:** `metin2-qa run real_smoke_login_walk` (gerçek sunucu), sonra `metin2-qa daemon` ile panelden kampanya.
 
 Bu sürümde headless client'ın desteklediği aksiyonlar: giriş/seçim, hareket, hedef/saldırı, item
 kullanma/giyme, yerden toplama, NPC + görev diyaloğu, chat, yeniden doğma. Dükkan, ticaret, grup ve kanal

@@ -159,8 +159,10 @@ class Struct:
 
 class Profile:
     def __init__(self, constants: dict[str, int], structs: dict[str, Struct], typedefs: dict[str, str],
-                 packets: dict[str, dict[str, Any]], encoding: str = TEXT_ENCODING, name: str = "profile"):
+                 packets: dict[str, dict[str, Any]], encoding: str = TEXT_ENCODING, name: str = "profile",
+                 sequence: list[int] | None = None):
         self.name = name
+        self.sequence = list(sequence or [])   # SEQUENCE baytları (boşsa sunucu SEQUENCE denetlemiyor)
         self.constants = constants
         self.structs = structs
         self.typedefs = typedefs
@@ -290,6 +292,7 @@ class Profile:
             "name": self.name, "encoding": self.encoding, "constants": self.constants, "typedefs": self.typedefs,
             "structs": {k: {"size": s.size, "fields": [f.to_json() for f in s.fields]} for k, s in self.structs.items()},
             "packets": self.packets,
+            **({"sequence": bytes(self.sequence).hex()} if self.sequence else {}),
         }
 
     @classmethod
@@ -297,7 +300,8 @@ class Profile:
         structs = {k: Struct(k, [Field(f["name"], f["type"], list(f.get("dims", []))) for f in v["fields"]])
                    for k, v in data["structs"].items()}
         return cls(data["constants"], structs, data.get("typedefs", {}), data["packets"],
-                   data.get("encoding", TEXT_ENCODING), data.get("name", "profile"))
+                   data.get("encoding", TEXT_ENCODING), data.get("name", "profile"),
+                   list(bytes.fromhex(data["sequence"])) if data.get("sequence") else None)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,6 +346,13 @@ def _parse_fields(body: str, consts: dict[str, int]) -> list[Field]:
     fields: list[Field] = []
     for decl in body.split(";"):
         decl = " ".join(decl.split())
+        # struct içi sabit: `static const int MAX_DATA_LEN = 256;` (sonraki dizi boyutlarında kullanılır)
+        sm = re.match(r"^static\s+const\s+[\w\s]+?\s+(\w+)\s*=\s*(.+)$", decl)
+        if sm:
+            val = _const_value(sm.group(2), consts)
+            if val is not None:
+                consts[sm.group(1)] = val
+            continue
         if not decl or decl.startswith(("typedef", "enum", "union", "#")) or "(" in decl:
             continue
         m = re.match(rf"^(?:struct\s+)?({_TYPE_WORDS})\s+(.+)$", decl)
@@ -366,6 +377,19 @@ def _parse_fields(body: str, consts: dict[str, int]) -> list[Field]:
     return fields
 
 
+_BODY_RX = re.compile(r"(\)\s*(?:const\s*)?(?::[^{};]*)?)\{[^{}]*\}")
+
+
+def _strip_function_bodies(text: str) -> str:
+    """Struct içindeki kurucu/metot gövdelerini at (`SItemPos() { ... }` → `SItemPos();`), en içten dışa.
+    Böylece metotlu struct'lar (TItemPos gibi) iç içe süslü parantez içermeden ayrıştırılır."""
+    while True:
+        new = _BODY_RX.sub(lambda m: m.group(1) + ";", text)
+        if new == text:
+            return text
+        text = new
+
+
 def parse_headers(texts: list[str], defines: dict[str, str]) -> tuple[dict[str, int], dict[str, Struct], dict[str, str]]:
     consts: dict[str, int] = {}
     structs: dict[str, Struct] = {}
@@ -373,15 +397,19 @@ def parse_headers(texts: list[str], defines: dict[str, str]) -> tuple[dict[str, 
     for raw in texts:
         # preprocess #define'ları local'e ekler; sayısal olanlar sabit olur
         local = dict(defines)
-        text = preprocess(raw, local)
+        text = _strip_function_bodies(preprocess(raw, local))
         for k, v in local.items():
             val = _const_value(v, consts) if v else None
             if val is not None:
                 consts[k] = val
         # enum'lar
-        for em in re.finditer(r"enum\s*\w*\s*(?::\s*\w+\s*)?\{(.*?)\}", text, re.S):
+        for em in re.finditer(r"(typedef\s+)?enum\s*(\w*)\s*(?::\s*\w+\s*)?\{(.*?)\}\s*(\w*)", text, re.S):
+            # adlı enum tipindeki alanlar int boyutundadır (MSVC/gcc)
+            for enum_name in (em.group(2), em.group(4) if em.group(1) else ""):
+                if enum_name:
+                    typedefs.setdefault(enum_name, "int")
             cur = -1
-            for item in em.group(1).split(","):
+            for item in em.group(3).split(","):
                 item = item.strip()
                 if not item:
                     continue
@@ -400,13 +428,20 @@ def parse_headers(texts: list[str], defines: dict[str, str]) -> tuple[dict[str, 
         for tm in re.finditer(rf"typedef\s+({_TYPE_WORDS})\s+(\w+)\s*;", text):
             typedefs[tm.group(2)] = " ".join(tm.group(1).split())
         # struct'lar (iç içe struct gövdesi yoktur varsayımı; Metin2 paketlerinde geçerli)
-        pat = re.compile(r"(typedef\s+)?struct\s+(\w+)?\s*\{([^{}]*)\}\s*(\w+)?\s*;", re.S)
+        # struct içindeki adsız enum'lar yukarıda sabit olarak alındı; gövdeden çıkar
+        text = re.sub(r"\benum\s*\{[^{}]*\}\s*;", "", text)
+        pat = re.compile(r"(typedef\s+)?struct\s+(\w+)?\s*\{([^{}]*)\}\s*(\w+)?\s*(?:,[^;{}]*)?;", re.S)
         for sm in pat.finditer(text):
             tag, body, alias = sm.group(2), sm.group(3), sm.group(4)
             names = [n for n in (alias, tag) if n]
             if not names:
                 continue
-            flds = _parse_fields(body, consts)
+            try:
+                flds = _parse_fields(body, consts)
+            except ProfileError:
+                # Paketlerde kullanılmayan yardımcı struct'lar (sınıf içi enum'lara bağlı diziler vb.)
+                # içe aktarmayı durdurmasın; bir paket buna ihtiyaç duyarsa struct'ı bilinmiyor görünür.
+                continue
             for n in names:
                 structs[n] = Struct(n, flds)
             if alias and tag:
@@ -415,27 +450,92 @@ def parse_headers(texts: list[str], defines: dict[str, str]) -> tuple[dict[str, 
 
 
 _SET_RX = re.compile(
-    r"Set\s*\(\s*(HEADER_\w+)\s*,\s*(?:\w+::)?(?:TPacketType\s*\()?\s*sizeof\s*\(\s*(\w+)\s*\)\s*"
-    r"(?:,\s*(STATIC_SIZE_PACKET|DYNAMIC_SIZE_PACKET|true|false|TRUE|FALSE|\"[^\"]*\"))?")
+    r"Set\s*\(\s*(HEADER_\w+)\s*,\s*(?:\w+::)?(?:TPacketType\s*\()?\s*sizeof\s*\(\s*([\w ]+?)\s*\)\s*"
+    r"(?:,\s*(STATIC_SIZE_PACKET|DYNAMIC_SIZE_PACKET|true|false|TRUE|FALSE|\"[^\"]*\"))?"
+    r"(?:\s*,\s*(true|false|TRUE|FALSE))?")
 
 
 def parse_size_tables(texts: list[str], defines: dict[str, str]) -> dict[str, dict[str, Any]]:
-    """header adı → {struct, dynamic}. Client (TPacketType) ve sunucu (packet_info) biçimlerini tanır."""
+    """header adı → {struct, dynamic, sequence}. Client (TPacketType) ve sunucu (packet_info) biçimlerini tanır.
+    Sunucu satırının son argümanı (`Set(HEADER_CG_X, sizeof(T), "Ad", true)`) paketin sonuna SEQUENCE
+    baytı eklendiğini belirtir."""
     out: dict[str, dict[str, Any]] = {}
     for raw in texts:
         text = preprocess(raw, dict(defines))
         for m in _SET_RX.finditer(text):
-            header, struct_name, flag = m.group(1), m.group(2), m.group(3)
+            header, struct_name, flag, seq = m.group(1), " ".join(m.group(2).split()), m.group(3), m.group(4)
             dynamic = flag == "DYNAMIC_SIZE_PACKET"
-            prev = out.get(header)
-            out[header] = {"struct": struct_name, "dynamic": dynamic or bool(prev and prev.get("dynamic"))}
+            prev = out.get(header) or {}
+            out[header] = {"struct": prev.get("struct") or struct_name,
+                           "dynamic": dynamic or bool(prev.get("dynamic")),
+                           "sequence": bool(seq and seq.lower() == "true") or bool(prev.get("sequence"))}
     return out
 
 
+def parse_header_values(texts: list[str], defines: dict[str, str]) -> dict[str, int]:
+    """Yalnızca HEADER_* sabitleri (ör. sunucunun packet.h'ı). Boyut tablosundaki sunucu adlarını, farklı
+    adlandıran istemci profiline numarayla eşlemek için kullanılır."""
+    consts: dict[str, int] = {}
+    for raw in texts:
+        text = preprocess(raw, dict(defines))
+        for em in re.finditer(r"enum\s*\w*\s*(?::\s*\w+\s*)?\{(.*?)\}", text, re.S):
+            cur = -1
+            for item in em.group(1).split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    val = _const_value(v, consts)
+                    if val is None:
+                        continue
+                    cur, k = val, k.strip()
+                else:
+                    cur, k = cur + 1, item
+                if re.fullmatch(r"HEADER_\w+", k):
+                    consts[k] = cur
+    return consts
+
+
+def parse_sequence_table(text: str) -> list[int]:
+    """sequence.cpp → `gc_abSequence[]` baytları (istemci her SEQUENCE paketinin sonuna sıradakini ekler)."""
+    m = re.search(r"gc_abSequence\s*\[[^\]]*\]\s*=\s*\{(.*?)\}", text, re.S)
+    if not m:
+        raise ProfileError("sequence tablosu (gc_abSequence) bulunamadı")
+    return [int(x, 0) for x in re.findall(r"0x[0-9a-fA-F]+|\d+", _strip_comments(m.group(1)))]
+
+
 def build_profile(header_texts: list[str], size_table_texts: list[str], defines: dict[str, str],
-                  name: str = "profile", encoding: str = TEXT_ENCODING) -> Profile:
+                  name: str = "profile", encoding: str = TEXT_ENCODING,
+                  value_header_texts: list[str] | None = None, sequence_text: str | None = None) -> Profile:
     consts, structs, typedefs = parse_headers(header_texts, defines)
     table = parse_size_tables(size_table_texts, defines)
+    # Boyut tablosunda profilde olmayan (başka adlandırılmış) header'lar: numara + yön ile eşle
+    if value_header_texts:
+        other = parse_header_values(value_header_texts, defines)
+        # O başlıklardaki struct'lar da eklenir (profilde aynı adlı olan korunur): TPacketCGEnterGame gibi
+        _, o_structs, o_typedefs = parse_headers(value_header_texts, defines)
+        for k, v in o_structs.items():
+            structs.setdefault(k, v)
+        for k, v in o_typedefs.items():
+            typedefs.setdefault(k, v)
+        by_value = {(h[7:9], v): h for h, v in consts.items() if h.startswith(("HEADER_CG_", "HEADER_GC_"))}
+        for h, info in list(table.items()):
+            if h in consts or h not in other:
+                continue
+            target = by_value.get((h[7:9], other[h]))
+            if target:
+                prev = table.get(target) or {}
+                table[target] = {"struct": prev.get("struct") or info["struct"],
+                                 "dynamic": bool(prev.get("dynamic") or info.get("dynamic")),
+                                 "sequence": bool(prev.get("sequence") or info.get("sequence"))}
+    # `sizeof(BYTE)` gibi yalın tipler: tek alanlı (header) struct üret
+    for info in table.values():
+        st = info.get("struct")
+        if st and st in PRIMITIVES:
+            syn = f"__{st.replace(' ', '_')}_packet"
+            structs.setdefault(syn, Struct(syn, [Field("header", st, [])]))
+            info["struct"] = syn
     packets: dict[str, dict[str, Any]] = {}
     for h, v in consts.items():
         if not h.startswith("HEADER_"):
@@ -445,7 +545,11 @@ def build_profile(header_texts: list[str], size_table_texts: list[str], defines:
         if st is None:
             st = _guess_struct(h, structs)
         packets[h] = {"header": v, "struct": st, "dynamic": bool(info.get("dynamic"))}
-    prof = Profile(consts, structs, typedefs, packets, encoding, name)
+        if info.get("sequence"):
+            packets[h]["sequence"] = True
+    _prune_unsized(structs, typedefs)
+    prof = Profile(consts, structs, typedefs, packets, encoding, name,
+                   parse_sequence_table(sequence_text) if sequence_text else None)
     for h, info in packets.items():
         if info["struct"] and info["struct"] not in structs and prof.resolve(info["struct"]) not in structs:
             info["struct"] = None
@@ -457,6 +561,22 @@ def build_profile(header_texts: list[str], size_table_texts: list[str], defines:
                     and prof.resolve(st.fields[1].type) in ("WORD", "uint16_t", "unsigned short", "USHORT"):
                 info["dynamic"] = True
     return prof
+
+
+def _prune_unsized(structs: dict[str, Struct], typedefs: dict[str, str]) -> None:
+    """Boyutu hesaplanamayan struct'ları (bilinmeyen sınıf/STL tipi içerenler) at; paket olmayan
+    yardımcı yapılar içe aktarmayı durdurmasın."""
+    probe = Profile.__new__(Profile)
+    probe.structs, probe.typedefs = structs, typedefs
+    changed = True
+    while changed:
+        changed = False
+        for n in list(structs):
+            try:
+                probe.sizeof(n)
+            except (ProfileError, RecursionError):
+                del structs[n]
+                changed = True
 
 
 def _guess_struct(header: str, structs: dict[str, Struct]) -> str | None:
@@ -472,7 +592,10 @@ def _guess_struct(header: str, structs: dict[str, Struct]) -> str | None:
 
 
 def import_profile(packet_headers: list[Path], size_tables: list[Path], define_files: list[Path],
-                   defines: list[str], name: str) -> Profile:
+                   defines: list[str], name: str, value_headers: list[Path] | None = None,
+                   sequence_table: Path | None = None) -> Profile:
     d = read_defines(define_files, defines)
     rd = lambda p: p.read_text(encoding="utf-8", errors="replace")  # noqa: E731
-    return build_profile([rd(p) for p in packet_headers], [rd(p) for p in size_tables], d, name)
+    return build_profile([rd(p) for p in packet_headers], [rd(p) for p in size_tables], d, name,
+                         value_header_texts=[rd(p) for p in value_headers or []],
+                         sequence_text=rd(sequence_table) if sequence_table else None)

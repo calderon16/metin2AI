@@ -79,7 +79,9 @@ def _packets(a) -> int:
 
     if a.packets_cmd == "import":
         prof = import_profile([Path(x) for x in a.packet_h], [Path(x) for x in a.size_table],
-                              [Path(x) for x in a.defines], a.define, a.name)
+                              [Path(x) for x in a.defines], a.define, a.name,
+                              value_headers=[Path(x) for x in a.value_headers],
+                              sequence_table=Path(a.sequence_table) if a.sequence_table else None)
         prof.save(Path(a.output))
         print(f"Profil yazıldı: {a.output}")
         a = argparse.Namespace(profile=a.output)
@@ -88,7 +90,10 @@ def _packets(a) -> int:
     known = [h for h, v in prof.packets.items() if v.get("struct")]
     print(f"{prof.name}: {len(prof.structs)} struct, {len(prof.packets)} header ({len(known)} tanesinin struct'ı biliniyor)")
     missing = []
+    optional = {"key_agreement", "key_agreement_completed"}   # yalnızca geliştirilmiş şifrelemeli fork'lar
     for logical, spec in b["packets"].items():
+        if logical in optional and not any(h in prof.packets for h in spec.get("gc", [])):
+            continue
         for d in ("cg", "gc"):
             cands = spec.get(d)
             if not cands:
@@ -214,6 +219,10 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--size-table", action="append", default=[],
                     help="Client PythonNetworkStream.cpp ve/veya sunucu packet_info.cpp")
     pi.add_argument("--defines", action="append", default=[], help="Locale_inc.h / CommonDefines.h / service.h")
+    pi.add_argument("--value-headers", action="append", default=[],
+                    help="Yalnızca HEADER_* numaraları alınacak başlık (ör. sunucunun packet.h'ı); boyut tablosundaki "
+                         "farklı adlandırılmış header'lar profile numarayla eşlenir")
+    pi.add_argument("--sequence-table", help="sequence.cpp (gc_abSequence); SEQUENCE baytı ekleyen sunucular için")
     pi.add_argument("--define", action="append", default=[], help="Ek define (AD veya AD=DEGER)")
     pi.add_argument("--name", default="metin2re")
     pi.add_argument("-o", "--output", required=True)

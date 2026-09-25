@@ -139,9 +139,11 @@ class HeadlessConfig:
     channel: int = 1
     # `metin2-qa packets import` ile üretilen paket profili (JSON)
     profile: str = "profiles/metin2re.json"
-    # none | xtea  (fork'un şifrelemesine göre; bkz. qa/headless/crypto.py)
+    # none | xtea | improved (fork'un şifrelemesine göre; improved = _IMPROVED_PACKET_ENCRYPTION_,
+    # bkz. qa/headless/crypto.py)
     crypto: str = "none"
-    # Client'ın login paketinde gönderdiği sürüm/istemci anahtarları (fork'a özel)
+    # Yükleme fazında HEADER_CG_CLIENT_VERSION(2) ile gönderilen sürüm (sunucunun CLIENT_VERSION ayarı /
+    # istemcinin sabit zaman damgası, ör. 1215955205). 0 = gönderme.
     client_version: int = 0
     timeout_s: float = 15.0
     # Hareket: birim/sn ve adım aralığı (sunucunun hız kontrolüne takılmamak için)

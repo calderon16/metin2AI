@@ -39,10 +39,21 @@ DEFAULT_BINDINGS: dict[str, Any] = {
     "interact_range": 400,
     "attack_interval_ms": 700,
     "script_close_answer": 254,
+    # Boyutu `size` alanından değil bayrak bitlerinden çıkan paketler. Klasik kaynakta questpc.cpp
+    # SendQuestInfoPacket `qi.size`'ı paketi tampona yazdıktan sonra artırır; giden size hep 6 kalır ve
+    # istemci ek alanları flag'e göre okur. {header: {flag_offset, base, fields: {bit: bayt}}}
+    "flag_sized": {
+        "HEADER_GC_QUEST_INFO": {"flag_offset": 5, "base": 6,
+                                 "fields": {1: 1, 2: 31, 4: 17, 8: 4, 16: 17, 32: 4, 64: 25}},
+    },
     "phases": {"HANDSHAKE": "PHASE_HANDSHAKE", "LOGIN": "PHASE_LOGIN", "SELECT": "PHASE_SELECT",
                "LOADING": "PHASE_LOADING", "GAME": "PHASE_GAME", "AUTH": "PHASE_AUTH", "DEAD": "PHASE_DEAD"},
     "packets": {
         "handshake": {"gc": ["HEADER_GC_HANDSHAKE"], "cg": ["HEADER_CG_HANDSHAKE"]},
+        # _IMPROVED_PACKET_ENCRYPTION_ (yalnızca crypto = "improved" olan fork'larda kullanılır)
+        "key_agreement": {"gc": ["HEADER_GC_KEY_AGREEMENT"], "cg": ["HEADER_CG_KEY_AGREEMENT"],
+                          "agreed": ["wAgreedLength"], "length": ["wDataLength"], "data": ["data"]},
+        "key_agreement_completed": {"gc": ["HEADER_GC_KEY_AGREEMENT_COMPLETED"]},
         "phase": {"gc": ["HEADER_GC_PHASE"], "phase": ["phase"]},
         "ping": {"gc": ["HEADER_GC_PING"], "cg": ["HEADER_CG_PONG"]},
         "auth_login": {"cg": ["HEADER_CG_LOGIN3", "HEADER_CG_LOGIN5_OPENID"], "login": ["login", "szLogin"],
@@ -54,6 +65,10 @@ DEFAULT_BINDINGS: dict[str, Any] = {
                           "name": ["szName"], "level": ["byLevel"], "id": ["dwID"]},
         "select": {"cg": ["HEADER_CG_CHARACTER_SELECT", "HEADER_CG_PLAYER_SELECT"], "index": ["index"]},
         "enter_game": {"cg": ["HEADER_CG_ENTERGAME"]},
+        # Yükleme fazında (MAIN_CHARACTER'dan sonra) gönderilir; sunucu g_bCheckClientVersion açıksa sürümü
+        # tutmayan ya da hiç göndermeyen oyuncuyu 10 sn sonra atar (input_login.cpp EnterGame)
+        "client_version": {"cg": ["HEADER_CG_CLIENT_VERSION2", "HEADER_CG_CLIENT_VERSION"],
+                           "filename": ["filename"], "timestamp": ["timestamp"]},
         "main_character": {"gc": ["HEADER_GC_MAIN_CHARACTER", "HEADER_GC_MAIN_CHARACTER2_EMPIRE",
                                   "HEADER_GC_MAIN_CHARACTER3_BGM", "HEADER_GC_MAIN_CHARACTER4_BGM_VOL"],
                            "vid": ["dwVID"], "name": ["szName", "szChrName"], "x": ["lx", "lX"], "y": ["ly", "lY"]},
@@ -67,6 +82,9 @@ DEFAULT_BINDINGS: dict[str, Any] = {
         "char_del": {"gc": ["HEADER_GC_CHARACTER_DEL"], "vid": ["id", "dwVID"]},
         "char_move": {"gc": ["HEADER_GC_MOVE"], "vid": ["dwVID"], "x": ["lX"], "y": ["lY"], "func": ["bFunc"]},
         "dead": {"gc": ["HEADER_GC_DEAD"], "vid": ["vid", "dwVID"]},
+        # Başka çekirdekteki haritaya geçiş: istemci yeni porta bağlanıp aynı giriş anahtarı ve karakter
+        # yuvasıyla doğrudan oyuna girer (CPythonNetworkStream::RecvWarpPacket / DirectEnterMode)
+        "warp": {"gc": ["HEADER_GC_WARP"], "x": ["lX"], "y": ["lY"], "addr": ["lAddr"], "port": ["wPort"]},
         "item_set": {"gc": ["HEADER_GC_ITEM_SET", "HEADER_GC_ITEM_SET2"], "pos": ["Cell", "pos"],
                      "vnum": ["vnum", "dwVnum"], "count": ["count", "bCount"]},
         "item_ground_add": {"gc": ["HEADER_GC_ITEM_GROUND_ADD"], "vid": ["dwVID"], "vnum": ["dwVnum"],
@@ -128,6 +146,12 @@ class Bindings:
                 return h
         raise ProfileError(f"'{logical}' için profilde CG paketi yok (adaylar: {self.spec(logical).get('cg')})")
 
+    def gc(self, logical: str) -> str:
+        for h in _aslist(self.spec(logical).get("gc")):
+            if h in self.profile.packets and self.profile.packets[h].get("struct"):
+                return h
+        raise ProfileError(f"'{logical}' için profilde GC paketi yok (adaylar: {self.spec(logical).get('gc')})")
+
     def supports(self, logical: str) -> bool:
         try:
             self.cg(logical)
@@ -153,6 +177,16 @@ class Bindings:
     def values(self, logical: str, header_name: str, **kv: Any) -> dict[str, Any]:
         """Mantıksal anahtarları struct alan adlarına çevir."""
         return {self.field(logical, k, header_name): v for k, v in kv.items()}
+
+    def flag_sized(self) -> dict[int, dict[str, Any]]:
+        """Profilde bulunan bayrak boyutlu paketler: header numarası → kural."""
+        out = {}
+        for name, rule in (self.b.get("flag_sized") or {}).items():
+            if name in self.profile.packets:
+                out[self.profile.packets[name]["header"]] = {
+                    "flag_offset": int(rule["flag_offset"]), "base": int(rule["base"]),
+                    "fields": {int(k): int(v) for k, v in rule["fields"].items()}}
+        return out
 
     def phase(self, key: str) -> int | None:
         return self.profile.constants.get(self.b["phases"].get(key, ""))

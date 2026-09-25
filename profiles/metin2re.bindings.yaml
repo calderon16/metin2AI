@@ -1,0 +1,20 @@
+# Metin2Re (TMP4 r40250 tabanlı, 2008 içerik sınırı) — headless client bağlamaları.
+# Profil istemcinin UserInterface/Packet.h adlarını kullanır (sunucu adları packet_info.cpp'den numarayla eşlendi);
+# burada yalnızca varsayılandan farklı olanlar var. Kaynak: source/metin2/src/server/game/src/{char.h,packet.h},
+# common/length.h ve source/ClientVS22/source/UserInterface/Packet.h.
+
+# EMoveFuncType (packet.h): FUNC_WAIT=0, FUNC_MOVE=1, FUNC_ATTACK=2, FUNC_COMBO=3
+move_funcs: {WAIT: 0, MOVE: 1, ATTACK: 2}
+
+packets:
+  # İstemci adları: HEADER_GC_PLAYER_POINTS / HEADER_GC_PLAYER_POINT_CHANGE (sunucuda CHARACTER_POINTS…)
+  points: {gc: [HEADER_GC_PLAYER_POINTS]}
+  point_change: {gc: [HEADER_GC_PLAYER_POINT_CHANGE]}
+  char_move: {gc: [HEADER_GC_CHARACTER_MOVE]}
+  # TPacketGCLoginSuccess4.akSimplePlayerInformation[4]
+  login_success: {players: [akSimplePlayerInformation]}
+  # TPacketCGLogin3 {name[31], pwd[17], adwClientKey[4]} / TPacketCGLogin2 {name[31], login_key, adwClientKey[4]}
+  auth_login: {login: [name], password: [pwd]}
+  game_login: {login: [name], key: [login_key]}
+  # Sunucu MAIN_CHARACTER3_BGM gönderir: szUserName
+  main_character: {name: [szName, szUserName]}
