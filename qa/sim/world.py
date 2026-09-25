@@ -1182,6 +1182,9 @@ class SimClient:
                 p.map, p.x, p.y, p.dest = int(a[0]), float(a[1]), float(a[2]), None
             elif cmd == "clear_inventory":
                 p.inventory = [None] * INVENTORY_SIZE
+            elif cmd == "questreset":
+                if not a:
+                    raise ValueError("görev adı gerekli")
             else:
                 raise ValueError(f"bilinmeyen komut {cmd}")
         except (ValueError, IndexError) as e:

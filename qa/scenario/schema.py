@@ -42,6 +42,7 @@ SETUP_OPS: dict[str, str] = {
     "set_hp": "hp",
     "teleport": "{map, x, y}",
     "clear_inventory": "",
+    "quest_reset": "görev adı (ör. mr2_s1_1): görevi başlangıç durumuna döndürür",
 }
 
 
@@ -165,6 +166,8 @@ class SetupOp(BaseModel):
             return f"/qa warp {int(a['map'])} {int(a['x'])} {int(a['y'])}"
         if self.name == "clear_inventory":
             return "/qa clear_inventory"
+        if self.name == "quest_reset":
+            return f"/qa questreset {a.get('quest', v)}"
         raise ValueError(self.name)
 
     def to_yaml(self) -> Any:

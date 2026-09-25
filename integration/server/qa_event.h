@@ -25,6 +25,10 @@ typedef CHARACTER* LPCHARACTER;
 
 extern bool g_bQaMode;
 
+// QA_MODE açıkken "AI_QA_" önekli hesap/karakter adlarında "_" karakterine izin verilir
+// (check_name_alphabet ve FN_IS_VALID_LOGIN_STRING yalnızca harf/rakam kabul eder).
+bool QaAllowsReservedName(const char* name);
+
 struct QaKV
 {
 	const char* key;
@@ -51,13 +55,16 @@ private:
 	FILE* m_fp;
 };
 
+// Tembel oluşturma: singleton ilk olayda yaratılır (main.cpp değişikliği gerekmez).
+CQaEventLog& QaEventLog();
+
 #define QA_KV(k, v) QaKV((k), (v))
 #define QA_EVENT(name, ch, ...) \
-	do { if (g_bQaMode) CQaEventLog::instance().Write("event", (name), (ch), { __VA_ARGS__ }); } while (0)
+	do { if (g_bQaMode) QaEventLog().Write("event", (name), (ch), { __VA_ARGS__ }); } while (0)
 #define QA_ERROR(name, ch, ...) \
-	do { if (g_bQaMode) CQaEventLog::instance().Write("quest_error", (name), (ch), { __VA_ARGS__ }); } while (0)
+	do { if (g_bQaMode) QaEventLog().Write("quest_error", (name), (ch), { __VA_ARGS__ }); } while (0)
 #define QA_ASSERT(cond, name, ch, ...) \
-	do { if (g_bQaMode && !(cond)) CQaEventLog::instance().Write("assert_fail", (name), (ch), \
+	do { if (g_bQaMode && !(cond)) QaEventLog().Write("assert_fail", (name), (ch), \
 		{ QaKV("cond", #cond), ##__VA_ARGS__ }); } while (0)
 
 #else

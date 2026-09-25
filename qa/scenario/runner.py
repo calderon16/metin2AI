@@ -63,6 +63,24 @@ def send_qa_command(ctx: GameContext, command: str) -> str:
         ctx.wait(100)
 
 
+WARP_SETTLE_TIMEOUT_MS = 45000
+
+
+def wait_until_settled(ctx: GameContext) -> None:
+    """Işınlanma olabilecek bir hazırlık komutundan sonra karakterin yeniden oyunda olmasını bekle.
+
+    Işınlanmada istemci yeni çekirdeğe bağlanır; bu sırada gönderilen bir paket (ör. sıradaki /qa
+    komutu) gerçek sunucuda sıra hatasıyla bağlantının kopmasına yol açar.
+    """
+    ctx.wait(2000)
+    start = ctx.now()
+    while not ctx.state().get("in_game"):
+        if ctx.now() - start > WARP_SETTLE_TIMEOUT_MS:
+            raise SetupError("Işınlanmadan sonra karakter oyuna dönmedi")
+        ctx.wait(250)
+    ctx.wait(1000)
+
+
 @dataclass
 class Agent:
     """Run'daki bir oyuncu: kendi bridge'i (istemcisi), bağlamı ve başlangıç görüntüsü."""
@@ -198,9 +216,13 @@ class RunSession:
         for a in self.agents.values():
             if reset:
                 send_qa_command(a.ctx, "/qa reset")
+                wait_until_settled(a.ctx)   # reset karakteri başlangıç noktasına ışınlayabilir
             for op in ops:
                 if self.agent(op.agent) is a:
-                    send_qa_command(a.ctx, op.to_command())
+                    command = op.to_command()
+                    send_qa_command(a.ctx, command)
+                    if command.split()[1:2] in (["reset"], ["warp"]):
+                        wait_until_settled(a.ctx)
         self.primary.ctx.wait(300)
         for a in self.agents.values():
             a.baseline = take_snapshot(a.ctx)

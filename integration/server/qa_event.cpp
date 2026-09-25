@@ -9,6 +9,18 @@
 
 bool g_bQaMode = false;
 
+bool QaAllowsReservedName(const char* name)
+{
+	return g_bQaMode && name && !strncasecmp(name, "AI_QA_", 6); // the client sends logins lowercased
+}
+
+CQaEventLog& QaEventLog()
+{
+	if (!CQaEventLog::instance_ptr())
+		new CQaEventLog;
+	return CQaEventLog::instance();
+}
+
 static void json_escape(std::string& out, const std::string& in)
 {
 	for (size_t i = 0; i < in.size(); ++i)

@@ -7,7 +7,8 @@ from qa.sim.world import SimWorld
 from qa.store.db import Store
 from qa.scenario.loader import list_scenarios, load_scenario, parse_scenario
 
-SCENARIOS = [s["name"] for s in list_scenarios(__import__("pathlib").Path(__file__).resolve().parents[1] / "scenarios")]
+SCENARIOS = [s["name"] for s in list_scenarios(__import__("pathlib").Path(__file__).resolve().parents[1] / "scenarios")
+             if "real_only" not in (s.get("tags") or [])]   # gerçek oyuna özel senaryolar simülatörde koşmaz
 
 
 @pytest.mark.parametrize("name", SCENARIOS)

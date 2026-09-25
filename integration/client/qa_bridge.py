@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Metin2 AI QA Bridge — istemci Python tarafı (root/qa_bridge.py)
 # ---------------------------------------------------------------------------
-# Python 2.7 uyumludur (klasik istemci). `json` paketinin istemcinin lib/ klasöründe olması gerekir.
+# Python 2.7 uyumludur (klasik istemci). JSON için yanındaki qa_json.py kullanılır.
 #
 # QaBridge.cpp her satırı OnLine(line) ile iletir, her frame OnUpdate() çağırır.
 # Yanıtlar qa.Send(json) ile gönderilir. Protokol: qa/bridge/protocol.py
@@ -22,10 +22,8 @@ import item
 import grp
 import qa
 
-try:
-	import json
-except ImportError:
-	raise ImportError("qa_bridge: istemcinin lib/ klasörüne Python 2.7 'json' paketini kopyalayın")
+# İstemcinin gömülü Python'unda stdlib json çalışmayabilir (_struct yok, paket içe aktarma sorunlu)
+import qa_json as json
 
 try:
 	import base64
@@ -105,9 +103,17 @@ def _need_game():
 
 # ------------------------------------------------------------------ UI kancaları
 def RegisterStage(name, window):
+	# Giriş ekranı açıldıysa önceki karakter seçim ekranı artık geçersizdir (ör. çıkış sonrası)
+	if name == "login":
+		_stages.pop("select", None)
 	_stages[name] = window
 	if name == "select" and "login" in _pending:
 		_ok(_pending.pop("login"), {"characters": _characters()})
+
+
+def UnregisterStage(name, window=None):
+	if window is None or _stages.get(name) is window:
+		_stages.pop(name, None)
 
 
 def OnLoginFailure(reason):
@@ -212,9 +218,23 @@ def _entities():
 	return rows
 
 
+_last_pos = [None, 0]   # (x, y), son değişim zamanı (ms)
+
+
 def _pos():
 	x, y, z = player.GetMainCharacterPosition()
-	return int(x), int(y)
+	pos = (int(x), int(-y))   # piksel y -> oyun y (qa.MoveTo / qa.GetCharacters ile aynı eksen)
+	if pos != _last_pos[0]:
+		_last_pos[0] = pos
+		_last_pos[1] = _now()
+	return pos
+
+
+def _is_moving():
+	# İstemcide chr.IsMoving yok: son 400 ms içinde konum değiştiyse hareket ediyor say
+	if hasattr(chr, "IsMoving"):
+		return bool(chr.IsMoving())
+	return _now() - _last_pos[1] < 400
 
 
 # ------------------------------------------------------------------ durum komutları
@@ -233,7 +253,7 @@ def cmd_get_player_state(a):
 		"exp": player.GetStatus(player.EXP), "hp": hp, "max_hp": player.GetStatus(player.MAX_HP),
 		"sp": player.GetStatus(player.SP), "max_sp": player.GetStatus(player.MAX_SP),
 		"gold": player.GetElk(), "x": x, "y": y, "map": _map_name(), "channel": net.GetServerInfo() if hasattr(net, "GetServerInfo") else None,
-		"dead": hp <= 0, "moving": bool(chr.IsMoving()) if hasattr(chr, "IsMoving") else False,
+		"dead": hp <= 0, "moving": _is_moving(),
 		"attacking": bool(_attack[0]), "target_vid": player.GetTargetVID() or None,
 	}
 
@@ -351,6 +371,53 @@ def cmd_get_quest_state(a):
 		data = quest.GetQuestData(i)
 		name, counter_name, counter_value = data[0], data[2] if len(data) > 2 else "", data[3] if len(data) > 3 else 0
 		out[name] = {"state": "active", "counter": counter_name, "progress": counter_value}
+	# Metin2Re görev motoru (mr2quest): kimliğe göre, hedef satırlarıyla
+	try:
+		import mr2quest
+	except ImportError:
+		return out
+	for qid, q in mr2quest.QUESTS.items():
+		objs = [{"label": label, "cur": cur, "max": maxv} for idx, (cur, maxv, label) in sorted(q["objs"].items())]
+		entry = {"state": "ready" if q.get("status") == 2 else "active", "title": q.get("title", ""),
+		         "progress": sum([min(o["cur"], o["max"]) for o in objs]), "objs": objs,
+		         "marked": q.get("mark") is not None}
+		mark = q.get("mark")
+		if mark is not None:
+			# İşaretli NPC (ya da ışınlayıcı) köprü koordinatında: x yerel, y = -yerel y (_pos ile aynı)
+			npc, vid, gx, gy, gate = mark
+			try:
+				import background
+				lx, ly = background.GlobalPositionToLocalPosition(gx, gy)
+				entry["target"] = {"npc": npc, "vid": vid, "x": lx, "y": -ly, "gate": bool(gate)}
+			except Exception:
+				pass
+			if mr2quest.GuideQuest() == qid:
+				try:
+					import questguide
+					entry["path"] = [{"x": x, "y": -y} for x, y in questguide.GetPath()]
+				except Exception:
+					pass
+		out[qid] = entry
+	for qid, a in mr2quest.AVAIL.items():
+		if qid in out:
+			continue
+		entry = {"state": "available", "title": a["title"], "progress": 0, "marked": True}
+		try:
+			import background
+			lx, ly = background.GlobalPositionToLocalPosition(a["x"], a["y"])
+			entry["target"] = {"npc": a["npc"], "vid": a["vid"], "x": lx, "y": -ly, "gate": bool(a["gate"])}
+		except Exception:
+			pass
+		if mr2quest.GuideQuest() == qid:
+			try:
+				import questguide
+				entry["path"] = [{"x": x, "y": -y} for x, y in questguide.GetPath()]
+			except Exception:
+				pass
+		out[qid] = entry
+	for qid in mr2quest.DONE:
+		if qid not in out:
+			out[qid] = {"state": "done", "progress": 0}
 	return out
 
 
@@ -371,7 +438,15 @@ def cmd_get_client_log(a):
 def cmd_screenshot(a):
 	_screenshot_seq[0] += 1
 	path = "screenshot/qa_%05d.jpg" % _screenshot_seq[0]
-	grp.SaveScreenShot(path)
+	if hasattr(grp, "SaveScreenShotToPath"):
+		# grp.SaveScreenShot yolu yok sayıp Belgeler\METIN2'ye yazar; ToPath verilen önekle kaydeder
+		ok, path = grp.SaveScreenShotToPath("screenshot/qa_%05d_" % _screenshot_seq[0])
+		if not ok:
+			raise QaError("SCREENSHOT_FAILED", "Ekran goruntusu kaydedilemedi")
+	else:
+		grp.SaveScreenShot(path)
+	import os
+	path = os.path.abspath(path)   # orchestrator başka klasörde çalışır
 	if base64:
 		f = open(path, "rb")
 		data = f.read()
@@ -381,10 +456,32 @@ def cmd_screenshot(a):
 
 
 # ------------------------------------------------------------------ aksiyonlar
+def _select_channel(stage, wanted=None):
+	import serverInfo
+	region = stage._LoginWindow__GetRegionID()
+	server = stage._LoginWindow__GetServerID()
+	try:
+		channels = serverInfo.REGION_DICT[region][server]["channel"]
+	except KeyError:
+		raise QaError("NO_SERVER", "Sunucu listesinde secili sunucu yok")
+	open_states = (serverInfo.STATE_DICT[1], serverInfo.STATE_DICT[2])
+	order = ([int(wanted)] if wanted else []) + sorted(channels.keys())
+	for channel_id in order:
+		if channel_id in channels and channels[channel_id].get("state") in open_states:
+			stage.channelList.SelectItem(channel_id - 1)
+			return channel_id
+	raise QaError("NO_CHANNEL", "Acik kanal yok (sunucu durumu henuz gelmemis olabilir)")
+
+
 def cmd_login(a, req_id):
 	stage = _stages.get("login")
 	if stage is None:
 		raise QaError("NO_LOGIN_STAGE", "Login ekrani acik degil")
+	board = getattr(stage, "serverBoard", None)
+	if board is not None and board.IsShow():
+		# Sunucu/kanal panosu açık: çalışan bir kanal seçip "Tamam"a basan yolla giriş panosuna geç
+		_select_channel(stage, a.get("channel"))
+		stage._LoginWindow__OnClickSelectServerButton()
 	stage.idEditLine.SetText(a["account"])
 	stage.pwdEditLine.SetText(a["password"])
 	_pending["login"] = req_id
@@ -533,7 +630,7 @@ def cmd_sell_item(a):
 
 def cmd_send_chat(a):
 	_need_game()
-	net.SendChatPacket(a["message"].encode("cp1254") if isinstance(a["message"], unicode) else a["message"])
+	net.SendChatPacket(json.encode_cp1254(a["message"]))
 	return {}
 
 

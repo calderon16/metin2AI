@@ -100,7 +100,11 @@ class QaService:
     def select_affected(self, changed_files: list[str] | None = None, base: str = "HEAD") -> dict[str, Any]:
         if changed_files is None:
             changed_files = git_changed_files(self.cfg.resolve(self.cfg.source_repo), base)
-        return select(self.cfg, changed_files, self.list_scenarios())
+        scenarios = self.list_scenarios()
+        if self.cfg.bridge.mode == "sim":
+            # Gerçek oyuna özel (real_only) senaryolar simülatörün dünyasında çalışamaz
+            scenarios = [s for s in scenarios if "real_only" not in (s.get("tags") or [])]
+        return select(self.cfg, changed_files, scenarios)
 
     def run_affected(self, changed_files: list[str] | None = None, base: str = "HEAD",
                      seed: int | None = None, dry_run: bool = False) -> dict[str, Any]:

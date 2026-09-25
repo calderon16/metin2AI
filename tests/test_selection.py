@@ -30,7 +30,8 @@ def test_scenario_file_change_selects_itself(service):
 
 
 def test_star_rule_selects_all(service):
-    assert len(names(service, ["qa/engine/behaviours.py"])) == len(service.list_scenarios())
+    sim_runnable = [s for s in service.list_scenarios() if "real_only" not in (s.get("tags") or [])]
+    assert len(names(service, ["qa/engine/behaviours.py"])) == len(sim_runnable)
 
 
 def test_fallback_and_docs(service):

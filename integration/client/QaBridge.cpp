@@ -6,6 +6,10 @@
 
 #include "QaBridge.h"
 
+#ifndef SO_EXCLUSIVEADDRUSE // winsock2.h tanimi; istemci winsock.h kullanir
+#define SO_EXCLUSIVEADDRUSE ((int)(~SO_REUSEADDR))
+#endif
+
 static const size_t QA_MAX_LINE = 1024 * 1024;
 static const size_t QA_MAX_CHAT_LOG = 500;
 
@@ -20,7 +24,9 @@ CQaBridge::~CQaBridge()
 
 bool CQaBridge::Initialize(unsigned short port)
 {
-	// WSAStartup istemcinin ağ katmanı (EterLib/NetDevice) tarafından zaten yapılmış olmalı
+	// WSAStartup referans sayımlıdır; istemcinin ağ katmanı henüz başlatmadıysa bile soket açılabilsin
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
 	m_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (m_listen == INVALID_SOCKET)
 	{
@@ -28,8 +34,9 @@ bool CQaBridge::Initialize(unsigned short port)
 		return false;
 	}
 
-	BOOL reuse = TRUE;
-	setsockopt(m_listen, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+	// Windows SO_REUSEADDR ayni portu ikinci bir istemcinin de dinlemesine izin verir; port tek istemciye ait olmali
+	BOOL exclusive = TRUE;
+	setsockopt(m_listen, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&exclusive, sizeof(exclusive));
 
 	sockaddr_in addr = {};
 	addr.sin_family = AF_INET;
@@ -144,16 +151,42 @@ void CQaBridge::__DispatchLine(const std::string& line)
 
 void CQaBridge::__CallPython(const char* func, const std::string* arg)
 {
-	PyObject* mod = PyImport_ImportModule("qa_bridge");
+	// PyImport_ImportModule, __import__'u 5 argümanla çağırır; istemcinin system.py'si onu 4 argümanlı
+	// __pack_import ile değiştirdiği için bu başarısız olur. `import` ifadesi 4 argüman kullanır.
+	// Yükleme hatası syserr'e bir kez yazılır; her frame tekrar denenmez
+	static bool s_importFailed = false;
+	if (s_importFailed)
+		return;
+
+	PyObject* modules = PyImport_GetModuleDict();
+	PyObject* mod = PyDict_GetItemString(modules, "qa_bridge");
+	// İstemcinin içe aktarıcısı hata veren modülü sys.modules'ta yarım bırakır; son tanımlanan
+	// fonksiyon (OnUpdate) yoksa modül eksik yüklenmiştir.
+	if (mod && !PyObject_HasAttrString(mod, "OnUpdate"))
+	{
+		PyDict_DelItemString(modules, "qa_bridge");
+		mod = NULL;
+	}
 	if (!mod)
 	{
-		PyErr_Print();
-		return;
+		PyRun_SimpleString((char*)"import qa_bridge");
+		mod = PyDict_GetItemString(modules, "qa_bridge");
+		if (!mod || !PyObject_HasAttrString(mod, "OnUpdate"))
+		{
+			TraceError("QA bridge: qa_bridge.py yuklenemedi (ayrintilar yukarida)");
+			if (mod)
+				PyDict_DelItemString(modules, "qa_bridge");
+			s_importFailed = true;
+			return;
+		}
 	}
+	Py_INCREF(mod);
 	PyObject* fn = PyObject_GetAttrString(mod, func);
+	if (!fn)
+		PyErr_Clear();
 	if (fn && PyCallable_Check(fn))
 	{
-		PyObject* res = arg ? PyObject_CallFunction(fn, "s#", arg->c_str(), (int)arg->size())
+		PyObject* res = arg ? PyObject_CallFunction(fn, (char*)"s#", arg->c_str(), (int)arg->size())
 		                    : PyObject_CallObject(fn, NULL);
 		if (!res)
 			PyErr_Print();

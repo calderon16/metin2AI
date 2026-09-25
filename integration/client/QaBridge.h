@@ -18,7 +18,8 @@
 
 #include <string>
 #include <deque>
-#include <winsock2.h>
+// Soket türleri istemcinin zaten dahil ettiği <winsock.h> (windows.h) üzerinden gelir;
+// burada <winsock2.h> eklemek yeniden tanım hatası verir.
 
 class CQaBridge : public CSingleton<CQaBridge>
 {

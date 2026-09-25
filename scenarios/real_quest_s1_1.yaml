@@ -1,0 +1,35 @@
+name: real_quest_s1_1
+description: Gerçek sunucu — Metin2Re görev motoru, 1. perde "Yeni Nöbetçi". Görev alma, iki konuşma hedefi, takip satırları, NPC işareti, teslim ve ödül.
+tags: [real, real_only, quest, mr2]
+covers: ["mr2_qlib.lua", "mr2_data.lua", "mr2_s1_1.quest", "mr2quest.py", "uimr2quest.py", "PythonQuestGuide.cpp", "PythonMiniMap.cpp"]
+account: AI_QA_001
+setup:
+  - quest_reset: mr2_s1_1
+steps:
+  - talk_npc: {vnum: 20354}
+  - select_dialog: {text: "Yeni"}
+  - select_dialog: {text: "Kabul"}
+    expect:
+      - quest: {name: s1_1, state: active}
+  - screenshot: accepted
+  - go_to_quest_npc: {quest: s1_1}
+  - select_dialog: {text: "Yeni"}
+    expect:
+      - quest: {name: s1_1, state: active, progress: 1}
+  - close_window: {name: dialog}
+    continue_on_failure: true
+  - go_to_quest_npc: {quest: s1_1}
+  - select_dialog: {text: "Yeni"}
+    expect:
+      - quest: {name: s1_1, state: ready}
+  - close_window: {name: dialog}
+    continue_on_failure: true
+  - screenshot: ready_marked
+  - go_to_quest_npc: {quest: s1_1}
+  - select_dialog: {text: "Yeni"}
+    expect:
+      - quest: {name: s1_1, state: done}
+  - screenshot: completed
+assert:
+  - alive
+  - system_message: "Yeni N"

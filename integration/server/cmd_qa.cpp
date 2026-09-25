@@ -27,6 +27,7 @@
 #include "item.h"
 #include "item_manager.h"
 #include "qa_event.h"
+#include "questmanager.h"
 
 // Reset sonrası başlangıç noktası (map1 köy merkezi) — sunucunuza göre değiştirin
 static const long QA_START_X = 469300;
@@ -160,6 +161,28 @@ ACMD(do_qa)
 		str_to_number(y, arg4);
 		qa_reply(ch, "warp");
 		ch->WarpSet(x, y);
+		return;
+	}
+
+	if (!strcmp(arg1, "questreset"))
+	{
+		// /qa questreset <görev_adı>  görevi başlangıç durumuna döndürür (bayraklar silinir)
+		quest::PC* pPC = quest::CQuestManager::instance().GetPCForce(ch->GetPlayerID());
+		if (!pPC || !*arg2)
+		{
+			qa_reply(ch, "questreset", "gorev adi gerekli");
+			return;
+		}
+		static const char* s_flags[] = { "st", "step", "dl", "ch", "o1", "o2", "o3", "o4", "o5", "o6", "o7", "o8",
+		                                 "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "done", "kills" };
+		for (size_t i = 0; i < sizeof(s_flags) / sizeof(s_flags[0]); ++i)
+			pPC->SetFlag(std::string(arg2) + "." + s_flags[i], 0);
+		pPC->SetQuestState(std::string(arg2), std::string("start"));
+		// Metin2Re görev motoru istemci modelinden de kaldır (mr2_ önekli görevler)
+		if (!strncmp(arg2, "mr2_", 4))
+			ch->ChatPacket(CHAT_TYPE_COMMAND, "MRQ_D %s", arg2 + 4);
+		QA_EVENT("QA_COMMAND", ch, QA_KV("command", "questreset"), QA_KV("quest", (const char*) arg2));
+		qa_reply(ch, "questreset");
 		return;
 	}
 

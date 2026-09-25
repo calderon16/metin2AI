@@ -168,7 +168,12 @@ class GameContext:
         if data.get("base64"):
             raw = base64.b64decode(data["base64"])
         elif data.get("path"):
-            raw = Path(data["path"]).read_bytes()
+            try:
+                raw = Path(data["path"]).read_bytes()
+            except OSError as exc:
+                # Görüntü yoksa test başarısız sayılmaz; kanıt eksikliği izde görünür
+                self.note("screenshot_missing", label=label, path=data["path"], error=str(exc))
+                return None
         else:
             return None
         ext = str(data.get("format") or "png").lower().lstrip(".")

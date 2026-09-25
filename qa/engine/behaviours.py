@@ -15,6 +15,7 @@ from ..bridge.protocol import ActionError
 from .executor import BehaviourError, GameContext, behaviour
 
 APPROACH_RANGE = 200
+DIALOG_WAIT_MS = 10000   # görev metninin yazılıp seçeneklerin gelmesi için
 PICKUP_RANGE = 150
 
 
@@ -52,7 +53,7 @@ def walk_to(ctx: GameContext, x: int, y: int, tolerance: int = 150, timeout_ms: 
     tx = ctx.rng.jitter(x, tolerance / 3)
     ty = ctx.rng.jitter(y, tolerance / 3)
     ctx.act("move_to", x=round(tx), y=round(ty))
-    start, retries = ctx.now(), 0
+    start, retries, best = ctx.now(), 0, None
     while True:
         ctx.wait(ctx.rng.movement_delay())
         s = _alive_state(ctx)
@@ -61,11 +62,65 @@ def walk_to(ctx: GameContext, x: int, y: int, tolerance: int = 150, timeout_ms: 
             return {"x": s["x"], "y": s["y"], "distance": round(d)}
         if ctx.now() - start > timeout_ms:
             raise BehaviourError("TIMEOUT", f"({x},{y}) noktasına ulaşılamadı", position=[s["x"], s["y"]])
-        if not s.get("moving"):
+        # Hedefe yaklaşıyorsa takılmış sayılmaz (gerçek istemcide "moving" bilgisi gecikmeli olabilir)
+        progressed = best is None or d < best - 10
+        best = d if best is None else min(best, d)
+        if not s.get("moving") and not progressed:
             retries += 1
             if retries > 3:
                 raise BehaviourError("STUCK", "Karakter hedefe ilerlemiyor", position=[s["x"], s["y"]])
             ctx.act("move_to", x=round(tx), y=round(ty))
+
+
+@behaviour("walk_by")
+def walk_by(ctx: GameContext, dx: int = 0, dy: int = 0, tolerance: int = 150, timeout_ms: int = 60000) -> dict[str, Any]:
+    """Bulunulan noktadan (dx, dy) kadar yürü. Doğma noktası sabit olmayan gerçek haritalar için."""
+    s = _alive_state(ctx)
+    return walk_to(ctx, x=int(s["x"]) + dx, y=int(s["y"]) + dy, tolerance=tolerance, timeout_ms=timeout_ms)
+
+
+@behaviour("go_to_quest_npc")
+def go_to_quest_npc(ctx: GameContext, quest: str, talk: bool = True, timeout_ms: int = 180000) -> dict[str, Any]:
+    """Görevin işaretlediği NPC'ye yürü ve konuş (Metin2Re görev motoru).
+
+    Hedef, oyuncunun gördüğü yanıp sönen harita işaretiyle aynıdır; ara noktalar istemcinin yol
+    rehberinin (yerdeki oklar) hesapladığı yoldan alınır. NPC başka haritadaysa hedef ışınlayıcıdır.
+    """
+    start = ctx.now()
+    while True:
+        q = ctx.query("get_quest_state").get(quest) or {}
+        t = q.get("target")
+        if not t:
+            raise BehaviourError("NO_TARGET", f"'{quest}' görevinde işaretli NPC yok", quest=q)
+        s = _alive_state(ctx)
+        if _dist(s, t["x"], t["y"]) <= QUEST_NPC_NEAR:
+            break
+        if ctx.now() - start > timeout_ms:
+            raise BehaviourError("TIMEOUT", "Görev NPC'sine ulaşılamadı", position=[s["x"], s["y"]], target=t)
+        wx, wy = _next_waypoint(s, q.get("path") or [], t)
+        try:
+            walk_to(ctx, x=round(wx), y=round(wy), tolerance=250, timeout_ms=30000)
+        except BehaviourError as e:
+            if e.code != "STUCK":
+                raise
+    if not talk or t.get("gate"):
+        return {"target": t}
+    return talk_npc(ctx, vnum=t["npc"])
+
+
+QUEST_NPC_NEAR = 1200
+
+
+def _next_waypoint(s: dict[str, Any], path: list[dict[str, Any]], t: dict[str, Any]) -> tuple[float, float]:
+    """Yol üzerinde oyuncudan en az 6 m ilerideki ilk nokta; yol yoksa hedefe doğru en çok 20 m."""
+    for p in path[1:]:
+        if _dist(s, p["x"], p["y"]) > 600:
+            return p["x"], p["y"]
+    d = _dist(s, t["x"], t["y"])
+    if d <= 2000:
+        return t["x"], t["y"]
+    k = 2000 / d
+    return s["x"] + (t["x"] - s["x"]) * k, s["y"] + (t["y"] - s["y"]) * k
 
 
 @behaviour("move_to_entity")
@@ -287,15 +342,27 @@ def talk_npc(ctx: GameContext, vnum: int | None = None, vid: int | None = None) 
 
 @behaviour("select_dialog")
 def select_dialog(ctx: GameContext, index: int | None = None, text: str | None = None) -> dict[str, Any]:
-    """Açık dialogdan seçenek seç (index veya metin parçası ile)."""
-    d = ctx.windows().get("dialog")
-    if not d:
-        raise BehaviourError("NO_DIALOG", "Açık dialog penceresi yok")
-    if text is not None:
-        matches = [i for i, o in enumerate(d["options"]) if text.lower() in o.lower()]
-        if not matches:
-            raise BehaviourError("NO_OPTION", f"'{text}' seçeneği yok", options=d["options"])
-        index = matches[0]
+    """Açık dialogdan seçenek seç (index veya metin parçası ile).
+
+    Gerçek istemci görev metnini harf harf yazar; seçenekler metin bitince gelir. Bu yüzden istenen
+    seçenek görünene kadar DIALOG_WAIT_MS boyunca beklenir.
+    """
+    start = ctx.now()
+    while True:
+        d = ctx.windows().get("dialog")
+        options = d["options"] if d else []
+        if text is not None:
+            matches = [i for i, o in enumerate(options) if text.lower() in o.lower()]
+            if matches:
+                index = matches[0]
+                break
+        elif options:
+            break
+        if ctx.now() - start > DIALOG_WAIT_MS:
+            if not d:
+                raise BehaviourError("NO_DIALOG", "Açık dialog penceresi yok")
+            raise BehaviourError("NO_OPTION", f"'{text}' seçeneği yok", options=options)
+        ctx.wait(250)
     if index is None:
         raise BehaviourError("BAD_ARGS", "index veya text gerekli")
     r = ctx.act("select_dialog", index=index)
@@ -520,11 +587,20 @@ def party_kick(ctx: GameContext, agent: str | None = None, vid: int | None = Non
 def login(ctx: GameContext) -> dict[str, Any]:
     if not ctx.account or ctx.password is None:
         raise BehaviourError("NO_ACCOUNT", "Hesap bilgisi yok")
-    chars = ctx.act("login", account=ctx.account, password=ctx.password)["characters"]
+    current = ctx.state()
+    if current.get("in_game"):
+        return current
     name = ctx.character or ctx.account
-    if not any(c["name"] == name for c in chars):
-        raise BehaviourError("NO_CHARACTER", f"'{name}' karakteri yok", characters=[c["name"] for c in chars])
+    if not current.get("logged_in"):
+        chars = ctx.act("login", account=ctx.account, password=ctx.password)["characters"]
+        if not any(c["name"] == name for c in chars):
+            raise BehaviourError("NO_CHARACTER", f"'{name}' karakteri yok", characters=[c["name"] for c in chars])
+    # else: istemci zaten karakter seçim ekranında (ör. kullanıcı elle girdi); girişi tekrarlama
     ctx.act("select_character", name=name)
+    return _wait_in_game(ctx)
+
+
+def _wait_in_game(ctx: GameContext) -> dict[str, Any]:
     start = ctx.now()
     while not ctx.state().get("in_game"):
         if ctx.now() - start > 30000:

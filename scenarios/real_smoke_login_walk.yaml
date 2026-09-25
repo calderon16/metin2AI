@@ -1,0 +1,14 @@
+name: real_smoke_login_walk
+description: Gerçek Metin2Re sunucusu için duman testi — login, karakter seçimi, /qa reset ile köy başlangıcı, göreli yürüme.
+tags: [real, movement, login]
+covers: ["input_login.cpp", "char_state.cpp", "cmd_qa.cpp"]
+account: AI_QA_001
+setup:
+  - set_gold: 1000
+steps:
+  - walk_by: {dx: 800, dy: 0}
+  - screenshot: after_walk
+  - walk_by: {dx: -800, dy: 600}
+assert:
+  - alive
+  - gold: {equals: 1000}
