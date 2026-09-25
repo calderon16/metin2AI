@@ -1,0 +1,30 @@
+# Metin2 AI QA servisi — Linux systemd birimi.
+#
+# Kurulum:
+#   sudo cp deploy/systemd/metin2-qa.service /etc/systemd/system/
+#   sudo install -m 600 /dev/null /etc/metin2-qa.env      # şifreler burada, repoda değil:
+#       QA_PANEL_TOKEN=...
+#       QA_ACCOUNT_PASSWORD=...
+#       GEMINI_API_KEY=...          (opsiyonel, otonom keşif için)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now metin2-qa
+#   journalctl -u metin2-qa -f
+[Unit]
+Description=Metin2 AI QA servisi (7/24 AI oyuncular + web panel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=metin2
+WorkingDirectory=/home/metin2/metin2AI
+EnvironmentFile=/etc/metin2-qa.env
+ExecStart=/home/metin2/metin2AI/.venv/bin/python -m qa --config /home/metin2/metin2AI/qa.local.toml daemon
+Restart=always
+RestartSec=5
+# Güvenlik sıkılaştırma
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

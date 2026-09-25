@@ -11,8 +11,9 @@ db_path = "artifacts/qa.sqlite"
 source_repo = "."
 
 [bridge]
-# "sim": in-process simülatör (kaynak kodu olmadan uçtan uca çalışır)
-# "tcp": Metin2_QA.exe'nin QA bridge'i (veya `metin2-qa sim-server`)
+# "sim"      : in-process simülatör (kaynak kodu olmadan uçtan uca çalışır)
+# "headless" : ekransız paket client — oyun client'ı olmadan gerçek sunucuya bağlanır ([headless])
+# "tcp"      : Metin2_QA.exe'nin QA bridge'i (görsel/UI testleri için; veya `metin2-qa sim-server`)
 mode = "sim"
 host = "127.0.0.1"
 port = 47800
@@ -77,3 +78,53 @@ always = ["smoke"]
 [selection.rules]
 # "pet_*.cpp" = ["pet"]
 # "offline_shop*" = ["shop", "scenario:offline_shop_basic"]
+
+[daemon]
+# 7/24 servis + web panel: `metin2-qa daemon`. Panel şifresi QA_PANEL_TOKEN ortam değişkeninde.
+host = "127.0.0.1"               # 0.0.0.0 yapılırsa QA_PANEL_TOKEN zorunlu
+port = 8765
+max_parallel_jobs = 4            # gerçek sunucuda paralel iş (sim modunda her zaman 1)
+snapshot_interval_s = 3.0
+reconnect_backoff_s = [2, 5, 15, 60]
+confirm_findings = true          # yeni bulguyu replay ile otomatik doğrula
+confirm_times = 3
+catalog = "catalog/systems.yaml"
+
+# Sürekli açık AI oyuncular (varsayılan: AI_QA_001..004)
+# [[daemon.agents]]
+# account = "AI_QA_001"
+# keep_online = true
+
+# Zamanlanmış işler
+# [[daemon.schedules]]
+# name = "gece-kampanya"
+# daily = "03:00"
+# job = { type = "campaign" }
+#
+# [[daemon.schedules]]
+# name = "saatlik-smoke"
+# every = "1h"
+# job = { type = "suite", tag = "smoke" }
+
+[headless]
+# Ekransız paket client ([bridge] mode = "headless")
+auth_host = "127.0.0.1"
+auth_port = 11002
+game_host = "127.0.0.1"
+channel = 1
+profile = "profiles/metin2re.json"   # metin2-qa packets import ... -o profiles/metin2re.json
+crypto = "none"                      # none | xtea (fork'a göre)
+timeout_s = 15.0
+walk_speed = 450.0                   # birim/sn — sunucunun hız kontrolüne takılmayacak değer
+move_interval_ms = 250
+
+[headless.channels]
+"1" = 13000
+
+# Konumdan harita numarası (sunucu map/<ad>/Setting.txt: BasePosition, MapSize*25600)
+# [[headless.maps]]
+# index = 1
+# x = 409600
+# y = 896000
+# width = 102400
+# height = 102400

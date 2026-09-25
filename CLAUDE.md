@@ -2,10 +2,11 @@
 
 - Kullanıcıyla her zaman **Türkçe** yaz. Kod içi yorumlar ve dokümanlar da Türkçe.
 - Python 3.11+, bağımlılıklar `.venv` içinde: `.venv/bin/pip install -e ".[dev]"`.
-- Testler: `.venv/bin/python -m pytest -q` (simülatöre karşı, ~2 sn). Her değişiklikten sonra çalıştır.
+- Testler: `.venv/bin/python -m pytest -q` (simülatör + sahte binary sunucu, ~40 sn). Her değişiklikten sonra çalıştır.
 - `integration/client/qa_bridge.py` **Python 2.7** uyumlu kalmalı (f-string yok, `except X, e` biçimi).
-- Bridge protokolünü değiştirirsen üç yeri birlikte güncelle: `qa/bridge/protocol.py`,
-  `qa/sim/world.py` (SimClient.cmd_*), `integration/client/qa_bridge.py`.
+- Bridge protokolünü değiştirirsen dört yeri birlikte güncelle: `qa/bridge/protocol.py`,
+  `qa/sim/world.py` (SimClient.cmd_*), `qa/headless/client.py` (HeadlessClient.cmd_* ya da NOT_SUPPORTED),
+  `integration/client/qa_bridge.py`.
   `tests/test_sim_bridge.py::test_every_sim_command_is_in_protocol` bunu kontrol eder.
 - Yeni behaviour: `qa/engine/behaviours.py` içinde `@behaviour("ad")`; yeni assertion:
   `qa/oracle/assertions.py` içinde `@assertion("ad")`. Şema ve MCP referansı otomatik güncellenir.
@@ -24,3 +25,11 @@ geliştirdiğinde onun senaryosunu da `write_scenario` ile ekle.
 `metin2-qa explore` / MCP `explore_autonomous`. Anahtar `GEMINI_API_KEY` ortam değişkeninde; asla dosyaya
 veya commit'e yazma. Testler gerçek API çağırmaz (`ScriptedProvider` ve yerel sahte HTTP sunucusu).
 Üretilen `scenarios/auto_*.yaml` dosyalarını commit'lemeden önce gözden geçir.
+
+## 7/24 servis ve headless
+- `metin2-qa daemon` ajanları sürekli oyunda tutar; web panel `qa/daemon/web/` (bağımlılıksız HTML/JS, Türkçe).
+- Daemon API'si `qa/daemon/server.py`; panel ve MCP aynı API'yi kullanır (`QA_DAEMON_URL`).
+- Headless client fork'a özel paketleri `profiles/*.json` (packet.h'dan) ve `*.bindings.yaml`'dan alır;
+  header/alan adlarını koda gömme, bindings'e ekle.
+- Oyun kaynağı gelince: `metin2-qa packets import` → `packets info` → eksik bağlamalar → fakeserver yerine
+  gerçek sunucuda `smoke_login_walk`.

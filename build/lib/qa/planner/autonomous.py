@@ -1,0 +1,325 @@
+"""Otonom keşif ajanı: LLM planlar, behaviour motoru oynar, oracle doğrular.
+
+    Hedef ("Dükkan sistemini oyuncu gibi kullan, edge-case ara")
+      → LLM: tool çağrıları (walk_to, buy_item, check, report_finding ...)
+      → ExplorationManager: gerçek oyuncu yolundan yürütme + durum farkı + sunucu hataları
+      → LLM: sonuçları değerlendirir, sonraki adıma karar verir
+      → finish: bulgu raporu + (isteğe bağlı) üretilmiş regression senaryosu + doğrulama çalıştırması
+
+Güvenlik: LLM yalnızca oyuncu behaviour'larını, gözlem/kontrol araçlarını ve ilk adımdan önce
+kısıtlı `/qa` hazırlığını görür. Shell, SQL, dosya erişimi yoktur. Bütçe: adım, tur, token.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+import yaml
+
+from ..config import QaConfig
+from ..engine import behaviours as _b  # noqa: F401  (BEHAVIOURS registry'i doldurur)
+from ..engine.executor import BEHAVIOURS
+from ..oracle.assertions import describe_assertions
+from ..scenario.loader import load_scenario
+from ..scenario.runner import ScenarioRunner
+from ..scenario.schema import SETUP_OPS
+from ..session import BridgeFactory
+from ..store.db import Store
+from .explore import ExplorationManager, suggest_checklist
+from .llm import LLMError, LLMProvider, Message, ToolCall, ToolResult, ToolSpec
+
+META_TOOLS = {"observe", "check", "qa_setup", "report_finding", "finish"}
+# Çok oyunculu behaviour'lar tek ajanlı keşifte anlamsız
+EXCLUDED_BEHAVIOURS = {"trade_with", "party_invite", "party_kick"}
+
+SYSTEM_PROMPT = """Sen bir Metin2 QA mühendisisin. Gerçek bir QA karakterini (AI_QA_*) oyunda oynatarak
+verilen sistemi test ediyor ve hata arıyorsun. Türkçe düşün ve raporla.
+
+Kurallar:
+- Her tool çağrısı gerçek oyuncu aksiyonudur (paket → sunucu → DB). Oyunu başka yoldan değiştiremezsin.
+- `qa_setup` (yang/item/seviye verme) YALNIZCA ilk oyuncu adımından önce kullanılabilir.
+- Her adımdan sonra sonucu incele: `diff` (durum farkı), `new_server_errors`, `new_qa_assert_failures`,
+  `failures`. Beklenmeyen her şey bir bulgu adayıdır.
+- Kuralları `check` ile doğrula (ör. yang eksiye düşmemeli, item kaybolmamalı, ödül tek sefer verilmeli).
+  `check` sonuçları üretilecek regression senaryosuna girer.
+- Reddedilmesi GEREKEN bir işlemi denediğinde adıma `expect_error` ver (ör. NOT_ENOUGH_GOLD).
+- Kendi hatalı çağrını (yanlış vnum, uzaktaki NPC vb.) bulgu sanma; bulgu = oyunun yanlış davranması.
+- Her gerçek bulguyu `report_finding` ile kanıtıyla (adım, beklenen, gerçekleşen) kaydet.
+- Edge-case'lere odaklan: sınır değerler, yetersiz yang, dolu envanter, tekrar eden işlemler,
+  yeniden bağlanma (reconnect), ölüp dirilme, pencereyi kapatıp açma.
+- Bütçen sınırlı: {max_steps} oyuncu adımı. Bitirirken `finish` çağır ve kısa bir özet yaz.
+- Her turda en az bir tool çağır; birden fazla bağımsız çağrı yapabilirsin."""
+
+
+def _param_schema(annotation: Any) -> dict[str, Any] | None:
+    a = str(annotation).replace(" ", "")
+    if a.startswith("dict") or "dict[" in a:
+        return None
+    if a.startswith("list[int]"):
+        return {"type": "array", "items": {"type": "integer"}}
+    if a.startswith("list"):
+        return {"type": "array", "items": {"type": "string"}}
+    for key, typ in (("bool", "boolean"), ("int", "integer"), ("float", "number"), ("str", "string")):
+        if a.split("|")[0] == key or a == key:
+            return {"type": typ}
+    return {"type": "string"}
+
+
+def behaviour_tools() -> list[ToolSpec]:
+    tools = []
+    for name, b in BEHAVIOURS.items():
+        if name in EXCLUDED_BEHAVIOURS or name in META_TOOLS:
+            continue
+        props: dict[str, Any] = {}
+        required = []
+        for p in b.params:
+            sch = _param_schema(p.annotation)
+            if sch is None:
+                continue
+            if p.default is not inspect.Parameter.empty:
+                sch["description"] = f"varsayılan: {p.default}"
+            else:
+                required.append(p.name)
+            props[p.name] = sch
+        props["expect_error"] = {"type": "string",
+                                 "description": "Bu adımın bu hata koduyla REDDEDİLMESİ bekleniyorsa (ör. NOT_ENOUGH_GOLD)"}
+        tools.append(ToolSpec(name, b.doc or name, {"type": "object", "properties": props, "required": required}))
+    return tools
+
+
+def meta_tools() -> list[ToolSpec]:
+    assertion_names = ", ".join(a["name"] for a in describe_assertions())
+    return [
+        ToolSpec("observe", "Karakterin anlık durumu: oyuncu, envanter, görevler, açık pencereler, yakın varlıklar, "
+                 "son sistem mesajları.", {"type": "object", "properties": {}}),
+        ToolSpec("check", "Oyun kurallarını doğrula. asserts: YAML liste, ör. "
+                 "'- gold: {min: 0}\\n- item_count: {vnum: 27001, delta: 3}\\n- server_errors: 0'. "
+                 f"Kullanılabilir: {assertion_names}. delta başlangıca (setup sonrası) göredir.",
+                 {"type": "object", "properties": {"asserts": {"type": "string"}}, "required": ["asserts"]}),
+        ToolSpec("qa_setup", "Test hazırlığı — YALNIZCA ilk oyuncu adımından önce. ops: YAML liste, ör. "
+                 f"'- set_gold: 1000\\n- give_item: {{vnum: 27001, count: 5}}'. İşlemler: {', '.join(SETUP_OPS)}.",
+                 {"type": "object", "properties": {"ops": {"type": "string"}}, "required": ["ops"]}),
+        ToolSpec("report_finding", "Bulunan hatayı kanıtıyla kaydet.",
+                 {"type": "object", "properties": {
+                     "title": {"type": "string"},
+                     "description": {"type": "string"},
+                     "severity": {"type": "string", "enum": ["critical", "major", "bug", "minor", "note"]},
+                     "step": {"type": "integer", "description": "Hatanın görüldüğü adım numarası"},
+                     "expected": {"type": "string"},
+                     "actual": {"type": "string"}},
+                  "required": ["title", "description", "severity"]}),
+        ToolSpec("finish", "Keşfi bitir. summary: ne test edildi, ne bulundu (kısa).",
+                 {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}),
+    ]
+
+
+def _compact(obj: Any, limit: int = 3500) -> Any:
+    s = json.dumps(obj, ensure_ascii=False, default=str)
+    if len(s) <= limit:
+        return obj
+    return {"truncated": True, "json": s[:limit] + "…"}
+
+
+def _step_view(r: dict[str, Any]) -> dict[str, Any]:
+    """Adım sonucunu LLM için özetle."""
+    out = {k: r.get(k) for k in ("step", "status", "result", "error", "diff", "new_server_errors",
+                                  "new_qa_assert_failures", "game_time_ms")}
+    out["failures"] = [{k: f.get(k) for k in ("kind", "name", "expected", "actual", "message")}
+                       for f in r.get("failures", [])]
+    out["client_events"] = r.get("client_events", [])[-12:]
+    st = r.get("state") or {}
+    out["state"] = {k: st.get(k) for k in ("hp", "max_hp", "sp", "gold", "level", "exp", "x", "y", "dead")}
+    out["windows"] = [w.get("name") for w in r.get("windows", {}).values()] if isinstance(r.get("windows"), dict) \
+        else r.get("windows")
+    return out
+
+
+@dataclass
+class ExploreBudget:
+    max_steps: int = 60
+    max_turns: int | None = None             # varsayılan: max_steps * 2 + 10
+    max_total_tokens: int | None = None
+    history_turns: int = 30                  # bağlamda tutulan son tur sayısı
+    max_idle_turns: int = 2                  # tool çağırmayan ardışık tur sınırı
+
+
+@dataclass
+class ExploreOutcome:
+    run_id: str
+    result: str
+    summary: str
+    stop_reason: str
+    agent_summary: str = ""
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    steps: int = 0
+    turns: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    saved_scenario: str | None = None
+    validation: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+
+class AutoExplorer:
+    def __init__(self, cfg: QaConfig, store: Store, provider: LLMProvider, factory: BridgeFactory | None = None):
+        self.cfg, self.store, self.provider = cfg, store, provider
+        self.factory = factory or BridgeFactory(cfg)
+        self.explorer = ExplorationManager(cfg, store, self.factory)
+
+    def run(self, goal: str, *, budget: ExploreBudget | None = None, account: str | None = None,
+            seed: int | None = None, setup: list[Any] | None = None, save_as_scenario: str | None = None,
+            validate: bool = True) -> ExploreOutcome:
+        b = budget or ExploreBudget()
+        max_turns = b.max_turns or b.max_steps * 2 + 10
+        start = self.explorer.start(goal, account, seed, setup)
+        if not start["ok"]:
+            return ExploreOutcome(start["run_id"], "ERROR", start["error"], "start_failed")
+        run_id = start["run_id"]
+        rs = self.explorer.sessions[run_id]["rs"]
+        transcript = rs.artifacts.path("llm_transcript.jsonl").open("w", encoding="utf-8")
+
+        tools = behaviour_tools() + meta_tools()
+        tool_names = {t.name for t in tools}
+        system = SYSTEM_PROMPT.format(max_steps=b.max_steps)
+        first = Message("user", text=(
+            f"TEST HEDEFİ:\n{goal}\n\nFikir listesi (edge-case'ler):\n"
+            + yaml.safe_dump(suggest_checklist(goal), allow_unicode=True, sort_keys=False)
+            + "\nBaşlangıç durumu:\n"
+            + json.dumps(_compact({k: start[k] for k in ("seed", "account", "state", "inventory", "nearby")}, 6000),
+                         ensure_ascii=False)
+            + "\n\nPlanını kısaca düşün, sonra tool çağrılarıyla test etmeye başla."))
+        history: list[Message] = [first]
+        findings: list[dict[str, Any]] = []
+        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        steps = turns = idle = 0
+        stop_reason, agent_summary = "max_turns", ""
+        error: str | None = None
+
+        try:
+            while turns < max_turns:
+                turns += 1
+                try:
+                    reply = self.provider.chat(system, history, tools)
+                except LLMError as e:
+                    error, stop_reason = str(e), "llm_error"
+                    break
+                for k in usage:
+                    usage[k] += reply.usage.get(k, 0)
+                history.append(reply.message)
+                calls = reply.message.tool_calls
+                if not calls:
+                    idle += 1
+                    if idle > b.max_idle_turns:
+                        stop_reason = "no_tool_calls"
+                        break
+                    history.append(Message("user", text="Devam etmek için bir tool çağır ya da `finish` ile bitir."))
+                    continue
+                idle = 0
+                results: list[ToolResult] = []
+                finished = False
+                for call in calls:
+                    if call.name == "finish":
+                        agent_summary = str(call.args.get("summary", ""))
+                        results.append(ToolResult(call.name, {"ok": True}, call.id))
+                        finished = True
+                        continue
+                    if call.name in tool_names - META_TOOLS and steps >= b.max_steps:
+                        results.append(ToolResult(call.name, {"ok": False, "error": "Adım bütçesi doldu; finish çağır."},
+                                                  call.id))
+                        continue
+                    res = self._execute(run_id, call, tool_names, findings)
+                    if call.name not in META_TOOLS and res.get("ok", True) is not False:
+                        steps += 1
+                    results.append(ToolResult(call.name, _compact(res), call.id))
+                note = ""
+                if steps >= b.max_steps and not finished:
+                    note = f"Adım bütçesi ({b.max_steps}) doldu. Şimdi `finish` çağır."
+                elif turns % 10 == 0:
+                    note = f"İlerleme: {steps}/{b.max_steps} adım, {len(findings)} bulgu, tur {turns}/{max_turns}."
+                history.append(Message("tool", text=note, tool_results=results))
+                transcript.write(json.dumps({
+                    "turn": turns, "text": reply.message.text,
+                    "calls": [{"name": c.name, "args": c.args} for c in calls],
+                    "results": [{"name": r.name, "content": r.content} for r in results],
+                    "usage": reply.usage}, ensure_ascii=False, default=str) + "\n")
+                transcript.flush()
+                if finished:
+                    stop_reason = "finished"
+                    break
+                if b.max_total_tokens and usage["total_tokens"] >= b.max_total_tokens:
+                    stop_reason = "token_budget"
+                    break
+                if steps >= b.max_steps + 3:  # finish çağırmadan bütçeyi zorlamaya devam ediyorsa
+                    stop_reason = "step_budget"
+                    break
+                history = self._trim(history, b.history_turns)
+        finally:
+            transcript.close()
+
+        extra = {"agent_summary": agent_summary, "stop_reason": stop_reason,
+                 "llm": {"provider": self.provider.name, "model": self.provider.model, "usage": usage,
+                         "turns": turns, "steps": steps},
+                 "evidence_llm_transcript": "llm_transcript.jsonl"}
+        if error:
+            rs.fail_infra(f"LLM hatası: {error}")
+        # Yürümeyen adımlar (LLM'in hatalı çağrıları) senaryoya girmez; oracle'ın itiraz ettiği adımlar girer
+        out = self.explorer.finish(run_id, findings, save_as_scenario, overwrite=True, drop_errored_steps=True,
+                                   extra=extra)
+        outcome = ExploreOutcome(run_id, out["result"], out["summary"], stop_reason, agent_summary, findings,
+                                 steps, turns, usage, out["saved_scenario"])
+        if save_as_scenario and out["saved_scenario"] and validate:
+            outcome.validation = self._validate(save_as_scenario)
+        return outcome
+
+    # ------------------------------------------------------------------ yardımcılar
+    def _execute(self, run_id: str, call: ToolCall, tool_names: set[str],
+                 findings: list[dict[str, Any]]) -> dict[str, Any]:
+        args = dict(call.args or {})
+        try:
+            if call.name not in tool_names:
+                return {"ok": False, "error": f"Bilinmeyen tool: {call.name}"}
+            if call.name == "observe":
+                return self.explorer.observe(run_id)
+            if call.name == "check":
+                asserts = yaml.safe_load(args.get("asserts") or "[]")
+                if not isinstance(asserts, list):
+                    asserts = [asserts]
+                return self.explorer.check(run_id, asserts)
+            if call.name == "qa_setup":
+                ops = yaml.safe_load(args.get("ops") or "[]")
+                return self.explorer.setup_more(run_id, ops if isinstance(ops, list) else [ops])
+            if call.name == "report_finding":
+                f = {k: args.get(k) for k in ("title", "description", "severity", "step", "expected", "actual")}
+                f["severity"] = f["severity"] or "bug"
+                findings.append(f)
+                return {"ok": True, "recorded": len(findings)}
+            expect_error = args.pop("expect_error", None)
+            raw: dict[str, Any] = {call.name: args or None}
+            if expect_error:
+                raw["expect_error"] = expect_error
+            return _step_view(self.explorer.step(run_id, raw))
+        except (ValueError, TypeError, KeyError, yaml.YAMLError) as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    @staticmethod
+    def _trim(history: list[Message], keep_turns: int) -> list[Message]:
+        # [ilk mesaj] + son keep_turns (assistant, tool) çifti; çiftler bölünmez
+        body = history[1:]
+        max_len = keep_turns * 2
+        if len(body) <= max_len:
+            return history
+        body = body[len(body) - max_len:]
+        while body and body[0].role != "assistant":
+            body = body[1:]
+        return [history[0]] + body
+
+    def _validate(self, name: str) -> dict[str, Any]:
+        """Üretilen senaryoyu aynı seed ile bir kez çalıştır: bulguyu yeniden üretiyor mu / geçiyor mu?"""
+        runner = ScenarioRunner(self.cfg, self.store, self.factory)
+        sc, text = load_scenario(self.cfg.scenarios_path, name)
+        rep = runner.run(sc, text)
+        return {"run_id": rep["run_id"], "result": rep["result"], "summary": rep["summary"]}

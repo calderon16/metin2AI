@@ -235,3 +235,42 @@ def test_panel_requires_token_off_loopback(daemon, monkeypatch):
     monkeypatch.delenv("QA_PANEL_TOKEN", raising=False)
     with pytest.raises(Exception, match="QA_PANEL_TOKEN"):
         PanelServer(daemon, "0.0.0.0", 0)
+
+
+def test_mcp_tools_use_daemon(panel, monkeypatch):
+    """Claude (MCP) → QA_DAEMON_URL → sunucudaki 7/24 ajanlar."""
+    import asyncio
+
+    from qa import mcp_server
+
+    monkeypatch.setenv("QA_DAEMON_URL", panel.url)
+    monkeypatch.setenv("QA_PANEL_TOKEN", "gizli")
+
+    def call(name, args):
+        out = asyncio.run(mcp_server.mcp.call_tool(name, args))
+        content = out[0] if isinstance(out, tuple) else out
+        return [json.loads(c.text) for c in content]
+
+    [st] = call("service_status", {})
+    assert st["agents"]["online"] == 4
+    assert len(call("list_agents", {})) == 4
+    [res] = call("run_scenario", {"name": "shop_insufficient_gold", "seed": 2})
+    assert res["status"] == "done" and res["report"]["result"] == "PASSED"
+    assert res["run_ids"][0] in {r["run_id"] for r in call("get_test_runs", {"limit": 5})}
+    panel.daemon.agents.world.faults = {"party_exp_dupe"}
+    [camp] = call("run_campaign", {"systems": ["party", "trade"]})
+    assert camp["matrix"]["party"]["status"] == "failed" and camp["matrix"]["trade"]["status"] == "passed"
+    findings = call("get_findings", {})
+    assert findings and all(f["system"] == "party" for f in findings)
+    [rep] = call("get_campaign_report", {})
+    assert rep["id"] == camp["result"]["campaign_id"]
+
+
+def test_mcp_daemon_tools_need_url(monkeypatch):
+    import asyncio
+
+    from qa import mcp_server
+
+    monkeypatch.delenv("QA_DAEMON_URL", raising=False)
+    with pytest.raises(Exception, match="QA_DAEMON_URL"):
+        asyncio.run(mcp_server.mcp.call_tool("list_agents", {}))
