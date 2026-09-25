@@ -9,7 +9,8 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from ..config import QaConfig
-from ..planner.llm import LLMProvider, make_provider
+from ..planner.llm import LLMProvider
+from ..planner.codex_fallback import create_explorer_provider
 from ..service import QaService
 from .agents import AgentManager
 from .campaign import load_catalog
@@ -47,8 +48,7 @@ class Daemon:
         if self._llm_factory is not None:
             return self._llm_factory()
         e = self.cfg.explorer
-        return make_provider(e.provider, e.model, api_key_env=e.api_key_env, temperature=e.temperature,
-                             thinking_budget=e.thinking_budget)
+        return create_explorer_provider(e)
 
     def llm_budget(self) -> "LLMBudget":
         from ..planner.budget import LLMBudget

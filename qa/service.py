@@ -119,12 +119,11 @@ class QaService:
                      model: str | None = None, provider: Any = None, validate: bool = True) -> dict[str, Any]:
         """Otonom keşif: LLM (varsayılan Gemini) hedefe göre oyunu kendi başına test eder."""
         from .planner.autonomous import AutoExplorer, ExploreBudget
-        from .planner.llm import make_provider
+        from .planner.codex_fallback import create_explorer_provider
 
         e = self.cfg.explorer
         if provider is None:
-            provider = make_provider(e.provider, model or e.model, api_key_env=e.api_key_env,
-                                     temperature=e.temperature, thinking_budget=e.thinking_budget)
+            provider = create_explorer_provider(e, model)
         budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
                                history_turns=e.history_turns)
         out = AutoExplorer(self.cfg, self.store, provider, self.factory).run(

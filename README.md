@@ -13,6 +13,12 @@ AI karakter veritabanına yazarak "sahte test" yapmaz. Her aksiyon gerçek oyunc
 
 ## Mimari
 
+Gemini günlük kotası dolduğunda yerel Codex CLI yedek keşif ajanı olarak kullanılabilir.
+`[explorer] fallback_provider = "codex_cli"` ayarını açmadan önce `codex login status` ile
+CLI oturumunu doğrulayın. Codex yalnız yapılandırılmış QA aracı çağrıları önerir; oyun
+işlemlerini QA motoru gerçekleştirir. CLI kullanımı Gemini'nin ücretsiz API kotasından
+ayrıdır; kullanım ve olası abonelik sınırları Codex hesabına bağlıdır.
+
 ```text
 [Web panel]  [Claude (MCP)]
       │  HTTP/JSON  │

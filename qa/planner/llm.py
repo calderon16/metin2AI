@@ -23,6 +23,10 @@ class LLMError(Exception):
     pass
 
 
+class QuotaExhausted(LLMError):
+    """Sağlayıcının günlük kotası doldu; yedek sağlayıcıya geçilebilir."""
+
+
 @dataclass
 class ToolSpec:
     name: str
@@ -161,7 +165,7 @@ class GeminiProvider:
                 if e.code == 429:
                     wait, daily = _quota_info(detail)
                     if daily:
-                        raise LLMError(f"Gemini günlük kotası doldu ({self.model}). Yarın sıfırlanır; hemen devam "
+                        raise QuotaExhausted(f"Gemini günlük kotası doldu ({self.model}). Yarın sıfırlanır; hemen devam "
                                        "etmek için Google AI Studio'da faturalandırmayı açın ya da daha yüksek ücretsiz "
                                        "sınırı olan bir model seçin ([explorer] model).") from e
                     if attempt < self.max_retries:

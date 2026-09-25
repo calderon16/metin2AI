@@ -94,6 +94,7 @@ class SelectionConfig:
 class ExplorerConfig:
     """Otonom keşif ajanı (LLM). API anahtarı dosyada DEĞİL, api_key_env'deki ortam değişkeninde."""
     provider: str = "gemini"
+    fallback_provider: str | None = None  # Gemini günlük kotası dolunca: "codex_cli"
     # Boşsa GEMINI_MODEL ortam değişkeni, o da yoksa sağlayıcının varsayılanı
     model: str | None = None
     api_key_env: str = "GEMINI_API_KEY"
