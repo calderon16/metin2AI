@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+# PROVIDE: metin2qa
+# REQUIRE: LOGIN NETWORKING
+# KEYWORD: shutdown
+#
+# Metin2 AI QA servisi (7/24 AI oyuncular + web panel) — FreeBSD rc.d betiği.
+#
+# Kurulum:
+#   cp deploy/freebsd/metin2qa /usr/local/etc/rc.d/metin2qa && chmod +x /usr/local/etc/rc.d/metin2qa
+#   sysrc metin2qa_enable=YES
+#   sysrc metin2qa_dir=/usr/home/metin2/metin2AI
+#   sysrc metin2qa_user=metin2
+#   sysrc metin2qa_env="QA_PANEL_TOKEN=degistir QA_ACCOUNT_PASSWORD=degistir GEMINI_API_KEY="
+#   service metin2qa start
+#
+. /etc/rc.subr
+
+name="metin2qa"
+rcvar="metin2qa_enable"
+load_rc_config $name
+
+: ${metin2qa_enable:="NO"}
+: ${metin2qa_dir:="/usr/home/metin2/metin2AI"}
+: ${metin2qa_user:="metin2"}
+: ${metin2qa_config:="${metin2qa_dir}/qa.local.toml"}
+: ${metin2qa_log:="/var/log/metin2qa.log"}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/sbin/daemon"
+command="/usr/sbin/daemon"
+command_args="-f -r -P ${pidfile} -u ${metin2qa_user} -o ${metin2qa_log} \
+    ${metin2qa_dir}/.venv/bin/python -m qa --config ${metin2qa_config} daemon"
+
+start_precmd="${name}_prestart"
+metin2qa_prestart()
+{
+    cd "${metin2qa_dir}" || return 1
+    touch "${metin2qa_log}" && chown "${metin2qa_user}" "${metin2qa_log}"
+    # rc.d ortam değişkenleri (şifreler burada, dosyada değil)
+    for kv in ${metin2qa_env}; do export "$kv"; done
+}
+
+run_rc_command "$1"

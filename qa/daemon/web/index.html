@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metin2 AI QA Paneli</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23b4412b'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'%3EQA%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="logo">QA</span>
+      <span class="brand-text">Metin2 AI QA <small>Panel</small></span>
+    </a>
+    <nav id="nav">
+      <a href="#/" data-route="">Genel bakış</a>
+      <a href="#/ajanlar" data-route="ajanlar">Ajanlar</a>
+      <a href="#/gorev" data-route="gorev">Görev ver</a>
+      <a href="#/isler" data-route="isler">İşler</a>
+      <a href="#/bulgular" data-route="bulgular">Bulgular</a>
+      <a href="#/kampanyalar" data-route="kampanyalar">Kampanyalar</a>
+      <a href="#/senaryolar" data-route="senaryolar">Senaryolar</a>
+    </nav>
+    <div class="topbar-right">
+      <span id="envBadge" class="badge muted">…</span>
+      <button id="themeBtn" class="icon-btn" title="Tema değiştir" aria-label="Tema değiştir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg></button>
+    </div>
+  </header>
+
+  <main id="app" aria-live="polite"></main>
+
+  <dialog id="loginDlg">
+    <form method="dialog" id="loginForm">
+      <h2>Panel şifresi</h2>
+      <p class="muted">Bu panel <code>QA_PANEL_TOKEN</code> ile korunuyor.</p>
+      <input id="tokenInput" type="password" autocomplete="current-password" placeholder="Şifre" required>
+      <div class="row end"><button class="btn primary" type="submit">Giriş</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

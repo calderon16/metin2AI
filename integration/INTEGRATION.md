@@ -23,7 +23,55 @@ orchestrator (Python 3)  ──TCP 127.0.0.1:47800, JSON-lines──►  Metin2_
 
 ---
 
-## 1. Client (Metin2_QA.exe)
+## 0. Headless mod (önerilen)
+
+Oyun client'ı açmadan, AI oyuncuların sunucu VM'inde 7/24 çalışması için: Python'daki ekransız client
+(`qa/headless`) auth/game sunucusuna gerçek paketlerle bağlanır. **Client tarafında hiçbir değişiklik
+gerekmez.** Sunucuda yalnızca 2. bölümdeki QA eklentileri (`/qa` hazırlık komutları, QA_EVENT) gerekir.
+
+1. **Paket profili:** fork'un kaynağından üretin (header numaraları, struct'lar, dinamik boyutlar):
+   ```sh
+   metin2-qa packets import \
+       --packet-h server/common/packet.h \
+       --size-table client/UserInterface/PythonNetworkStream.cpp \
+       --size-table server/game/src/packet_info.cpp \
+       --defines client/UserInterface/Locale_inc.h --defines server/common/service.h \
+       --name metin2re -o profiles/metin2re.json
+   metin2-qa packets info profiles/metin2re.json
+   ```
+   `info` çıktısında `YOK` görünen mesajları fork'taki adlarıyla `profiles/metin2re.bindings.yaml` içinde
+   eşleyin (bkz. `qa/headless/bindings.py` DEFAULT_BINDINGS).
+2. **Şifreleme:** fork paket şifrelemesi kullanıyorsa `[headless] crypto` ayarlanır. `none` ve deneysel
+   `xtea` hazır. `_IMPROVED_PACKET_ENCRYPTION_` (anahtar anlaşması) fork'un koduna göre eklenecek; test
+   sunucusunda şifreleme kapatılabiliyorsa en hızlı yol budur.
+3. **Ayarlar** (`qa.local.toml`):
+   ```toml
+   [bridge]
+   mode = "headless"
+   [headless]
+   auth_host = "127.0.0.1"
+   auth_port = 11002
+   profile = "profiles/metin2re.json"
+   [headless.channels]
+   "1" = 13000
+   [[headless.maps]]            # konumdan harita numarası (map/<ad>/Setting.txt)
+   index = 1
+   x = 409600
+   y = 896000
+   width = 102400
+   height = 102400
+   ```
+4. **Doğrulama:** `metin2-qa run smoke_login_walk`, sonra `metin2-qa daemon` ile panelden kampanya.
+
+Bu sürümde headless client'ın desteklediği aksiyonlar: giriş/seçim, hareket, hedef/saldırı, item
+kullanma/giyme, yerden toplama, NPC + görev diyaloğu, chat, yeniden doğma. Dükkan, ticaret, grup ve kanal
+değiştirme, fork'un paketleri doğrulandıktan sonra eklenecek (şimdilik `NOT_SUPPORTED` döner). Ekran
+görüntüsü yerine etraftaki varlıkların kuşbakışı haritası üretilir. Görsel/UI testleri gerektiğinde
+aşağıdaki QA client yolu kullanılabilir.
+
+---
+
+## 1. Client (Metin2_QA.exe) — opsiyonel, görsel/UI testleri için
 
 ### 1.1 Build bayrağı
 Ayrı bir `QA` build konfigürasyonu oluşturun ve yalnızca onda tanımlayın:

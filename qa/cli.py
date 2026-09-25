@@ -11,6 +11,8 @@
     metin2-qa show QA-2026-00012 [--trace]
     metin2-qa reference
     metin2-qa sim-server --port 47800 --fault no_drop
+    metin2-qa daemon                          # 7/24 servis + web panel (http://127.0.0.1:8765)
+    metin2-qa campaign                        # her şeyi test et (tek seferlik)
 """
 
 from __future__ import annotations
@@ -69,6 +71,100 @@ def _explore(s, a, ap) -> int:
     return 1 if a.fail_on_findings and bad else 0
 
 
+def _packets(a) -> int:
+    from pathlib import Path
+
+    from .headless.bindings import Bindings
+    from .headless.profile import Profile, import_profile
+
+    if a.packets_cmd == "import":
+        prof = import_profile([Path(x) for x in a.packet_h], [Path(x) for x in a.size_table],
+                              [Path(x) for x in a.defines], a.define, a.name)
+        prof.save(Path(a.output))
+        print(f"Profil yazıldı: {a.output}")
+        a = argparse.Namespace(profile=a.output)
+    prof = Profile.load(Path(a.profile))
+    b = Bindings.for_profile(prof, Path(a.profile))
+    known = [h for h, v in prof.packets.items() if v.get("struct")]
+    print(f"{prof.name}: {len(prof.structs)} struct, {len(prof.packets)} header ({len(known)} tanesinin struct'ı biliniyor)")
+    missing = []
+    for logical, spec in b["packets"].items():
+        for d in ("cg", "gc"):
+            cands = spec.get(d)
+            if not cands:
+                continue
+            cands = cands if isinstance(cands, list) else [cands]
+            hit = next((h for h in cands if h in prof.packets and prof.packets[h].get("struct")), None)
+            print(f"  {'OK ' if hit else 'YOK'} {logical:16} {d.upper()} {hit or ' | '.join(cands)}")
+            if not hit:
+                missing.append(logical)
+    if missing:
+        print(f"Eksik bağlamalar: {sorted(set(missing))} — <profil>.bindings.yaml ile fork adlarını eşleyin")
+    return 0
+
+
+def _daemon(a) -> int:
+    import signal
+    import threading
+
+    from .daemon.core import Daemon
+    from .daemon.server import PanelServer
+
+    cfg = load_config(a.config)
+    d = Daemon(cfg)
+    srv = PanelServer(d, a.host, a.port)
+    d.start(start_agents=not a.no_agents)
+    srv.start()
+    print(f"Metin2 QA servisi çalışıyor — panel: {srv.url}  (mod: {cfg.bridge.mode}, ajan: {len(d.agents.agents)})",
+          flush=True)
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, lambda *_: stop.set())
+        except (ValueError, OSError):
+            pass
+    try:
+        while not stop.wait(1):
+            pass
+    finally:
+        print("Kapatılıyor…", flush=True)
+        srv.shutdown()
+        d.shutdown()
+    return 0
+
+
+def _campaign(a) -> int:
+    from .daemon.core import Daemon
+
+    cfg = load_config(a.config)
+    d = Daemon(cfg)
+    d.start()
+    try:
+        d.agents.wait_online(timeout_s=60)
+        params = {"explore": a.explore}
+        if a.systems:
+            params["systems"] = [x.strip() for x in a.systems.split(",") if x.strip()]
+        if a.seed is not None:
+            params["seed"] = a.seed
+        job = d.jobs.wait(d.jobs.submit("campaign", params, source="cli"), timeout_s=24 * 3600)
+        if job["status"] != "done":
+            print(f"Kampanya {job['status']}: {job.get('error')}", file=sys.stderr)
+            return 2
+        c = d.db.get_campaign(job["result"]["campaign_id"])
+        rows = []
+        for sid, v in c["matrix"].items():
+            print(f"{v['status']:9} {v['name']}")
+            res = "PASSED" if v["status"] == "passed" else ("FAILED" if v["status"] in ("failed", "findings") else
+                                                            "ERROR" if v["status"] == "error" else "SKIPPED")
+            rows.append({"scenario": v["name"], "result": res,
+                         "summary": ", ".join(f"{r['scenario']}={r['result']}" for r in v["scenarios"]) or "senaryo yok"})
+        print(json.dumps(c["summary"], ensure_ascii=False))
+        _write_summary(a.summary_md, rows, f"Metin2 QA — kampanya #{c['id']}")
+        return 1 if c["summary"]["counts"].get("failed") else 0
+    finally:
+        d.shutdown()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="metin2-qa", description="Metin2 AI QA Player")
     ap.add_argument("--config", help="qa.toml yolu (varsayılan: QA_CONFIG / ./qa.local.toml / ./qa.toml)")
@@ -111,6 +207,27 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("sim-server", help="Simülatörü TCP'de sun")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("mcp", help="MCP sunucusunu stdio'da başlat")
+    p = sub.add_parser("packets", help="Headless client için paket profili (packet.h'dan)")
+    psub = p.add_subparsers(dest="packets_cmd", required=True)
+    pi = psub.add_parser("import", help="packet.h + boyut tablolarından profil üret")
+    pi.add_argument("--packet-h", action="append", required=True, help="packet.h (birden çok verilebilir)")
+    pi.add_argument("--size-table", action="append", default=[],
+                    help="Client PythonNetworkStream.cpp ve/veya sunucu packet_info.cpp")
+    pi.add_argument("--defines", action="append", default=[], help="Locale_inc.h / CommonDefines.h / service.h")
+    pi.add_argument("--define", action="append", default=[], help="Ek define (AD veya AD=DEGER)")
+    pi.add_argument("--name", default="metin2re")
+    pi.add_argument("-o", "--output", required=True)
+    pinfo = psub.add_parser("info", help="Profil özeti ve headless client uyumluluğu")
+    pinfo.add_argument("profile")
+    p = sub.add_parser("daemon", help="7/24 QA servisi + web panel")
+    p.add_argument("--host", help="Panel adresi (varsayılan qa.toml [daemon].host)")
+    p.add_argument("--port", type=int)
+    p.add_argument("--no-agents", action="store_true", help="Ajanları otomatik başlatma")
+    p = sub.add_parser("campaign", help="Her şeyi test et (daemon olmadan, tek seferlik)")
+    p.add_argument("--systems", help="Virgülle ayrılmış sistem id'leri")
+    p.add_argument("--explore", action="store_true", help="LLM ile her sistemde keşif de yap")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--summary-md")
 
     a = ap.parse_args(argv)
 
@@ -124,6 +241,13 @@ def main(argv: list[str] | None = None) -> int:
 
         mcp_main()
         return 0
+
+    if a.cmd == "daemon":
+        return _daemon(a)
+    if a.cmd == "packets":
+        return _packets(a)
+    if a.cmd == "campaign":
+        return _campaign(a)
 
     from .service import QaService
 

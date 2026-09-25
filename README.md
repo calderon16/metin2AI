@@ -14,18 +14,22 @@ AI karakter veritabanına yazarak "sahte test" yapmaz. Her aksiyon gerçek oyunc
 ## Mimari
 
 ```text
-Claude ──MCP──► qa/mcp_server.py ──► QaService
-                                        ├─ ScenarioRunner (YAML senaryo)   ├─ Build Manager (whitelist)
-                                        ├─ ExplorationManager (keşif)      ├─ Store (SQLite + artifacts/)
-                                        └─ Replay
-                                              │
-                          Behaviour Engine (walk_to, kill_monster, buy_item ...)  ← seed'li RNG
-                                              │  bridge protokolü (JSON-lines / TCP)
-                         ┌────────────────────┴───────────────────┐
-                    Metin2_QA.exe (gerçek)                qa/sim (simülatör)
-                    integration/client/*                  aynı protokol, deterministik
-                         │ normal paketler
-                    game/db/auth + integration/server/* (QA_EVENT, QA_ASSERT, /qa)
+[Web panel]  [Claude (MCP)]
+      │  HTTP/JSON  │
+      ▼             ▼
+ metin2-qa daemon — test sunucusunun VM'inde 7/24
+ ├─ Ajanlar: AI_QA_001..N sürekli oyunda ("online tut", kopunca yeniden bağlanır)
+ ├─ İş kuyruğu + zamanlayıcı: senaryo / suite / değişen dosyalar / AI keşfi / "her şeyi test et"
+ ├─ Bulgular: tekilleştirme, replay ile doğrulama, düzeldi/geriledi takibi
+ └─ Kampanya: 21 sistemlik katalog → sistem sağlık matrisi
+      │
+ Behaviour Engine (walk_to, kill_monster, trade_with ...) + Bug Oracle
+      │  bridge sözleşmesi (cmd_*)
+      ├─ headless  : ekransız paket client → auth/game sunucusuna GERÇEK paketlerle (client gerekmez)
+      ├─ sim       : deterministik simülatör (kaynak kodu olmadan geliştirme/test)
+      └─ tcp       : Metin2_QA.exe + QaBridge (görsel/UI testleri için, opsiyonel)
+      ▼
+ game/db/auth + integration/server/* (QA_EVENT, QA_ASSERT, /qa hazırlık komutları)
 ```
 
 - **LLM her tuşa basmaz.** Claude "5 köpek kes" der; `kill_monster` behaviour'ı mob bulur,
@@ -80,6 +84,48 @@ QA_CONFIG=qa.toml .venv/bin/metin2-qa run quest_dog_hunt   # PASSED
 | `trade_accept_not_reset` | `trade_change_after_accept` (onay sıfırlanmadı → dolandırıcılık) |
 | `party_exp_dupe` | `party_exp_share` (exp paylaşımı) |
 
+## 7/24 servis ve web panel
+
+AI oyuncular test sunucusunun VM'inde sürekli açık durur; oyun client'ı açmak gerekmez. Onları web
+panelden yönetirsin:
+
+```bash
+QA_PANEL_TOKEN=gizli metin2-qa daemon          # panel: http://127.0.0.1:8765
+```
+
+- **Genel bakış:** ajan kartları (online/meşgul/koptu, HP, yang, konum, çalıştığı iş), sistem sağlık
+  matrisi, son işler, açık bulgular.
+- **Görev ver:** "Her şeyi test et" kampanyası, tek senaryo, etiket suite'i, değişen dosyalar, serbest AI
+  keşfi (Gemini anahtarı varsa).
+- **Run raporu:** adımlar, oracle kontrolleri (beklenen/gerçekleşen), ekran görüntüleri, action trace,
+  sunucu/client logları, "tekrar oynat".
+- **Bulgular:** aynı hata tekrar görülünce yeni kayıt açılmaz. Yeni bulgu otomatik 3 kez tekrar oynatılır
+  ("doğrulandı 3/3" / "kararsız"). Senaryo tekrar geçince "düzeldi", tekrar bozulursa "geriledi" olur.
+- **Kampanyalar:** `catalog/systems.yaml`'daki her sistem test edilir. Önceki kampanyaya göre yeni
+  kırmızılar işaretlenir. Senaryosu olmayan sistemler "test edilmedi" olarak görünür.
+- **Zamanlama:** `[[daemon.schedules]]` ile örneğin her gece 03:00'te kampanya, saatlik smoke ya da
+  `continuous` (ajanlar boşta kaldıkça sürekli oynar).
+
+Kurulum (FreeBSD rc.d / Linux systemd / Windows): [deploy/README.md](deploy/README.md).
+
+## Headless mod: oyun client'ı olmadan gerçek oyuncu
+
+`[bridge] mode = "headless"` ile ajanlar Python'daki ekransız bir Metin2 client'ıyla auth/game
+sunucusuna bağlanır ve gerçek client'ın gönderdiği paketlerin aynısını gönderir: login, karakter seçimi,
+insan hızında adım adım hareket, saldırı, item, NPC/görev diyaloğu, chat. Paket numaraları ve yapıları
+fork'tan fork'a değiştiği için elle yazılmaz, **kaynaktan otomatik çıkarılır**:
+
+```bash
+metin2-qa packets import --packet-h <kaynak>/common/packet.h \
+    --size-table <client>/UserInterface/PythonNetworkStream.cpp \
+    --size-table <server>/game/src/packet_info.cpp \
+    --defines <client>/UserInterface/Locale_inc.h -o profiles/metin2re.json
+metin2-qa packets info profiles/metin2re.json      # hangi mesajlar eşlendi, hangileri eksik
+```
+
+Fork'ta adı farklı olan paket/alanlar `profiles/metin2re.bindings.yaml` ile eşlenir. Ayrıntılar:
+[integration/INTEGRATION.md](integration/INTEGRATION.md#0-headless-mod-önerilen).
+
 ## Claude ile kullanım (MCP)
 
 `.mcp.json` repoda hazır; Claude Code bu klasörde açıldığında `metin2-qa` sunucusunu görür.
@@ -98,6 +144,11 @@ Claude Desktop için aynı komutu (`.venv/bin/python -m qa.mcp_server`, `QA_CONF
 | `get_player_state`, `reset_test_account` | canlı durum, QA hesabı sıfırlama |
 | `explore_start`, `explore_step`, `explore_check`, `explore_observe`, `explore_finish` | serbest keşif; bitince senaryo olarak kaydedilebilir |
 | `explore_autonomous` | otonom keşif ajanı (Gemini) — hedefi ver, kendi başına test etsin |
+| `service_status`, `list_agents`, `submit_job`, `get_job` | 7/24 servis (`QA_DAEMON_URL` tanımlıyken) |
+| `run_campaign`, `get_campaign_report`, `get_findings`, `update_finding` | "her şeyi test et" ve bulgu yönetimi |
+
+`QA_DAEMON_URL` (ve `QA_PANEL_TOKEN`) tanımlıysa `run_*` tool'ları işi sunucudaki sürekli açık ajanlara
+gönderir; Claude'un çalıştırdığı her şey panelde de görünür.
 
 Kapalı döngü örneği:
 
@@ -269,6 +320,10 @@ qa/mcp_server.py, qa/cli.py, qa/service.py
 integration/   gerçek client/sunucu kodu + INTEGRATION.md
 scenarios/     örnek senaryolar
 qa/selection.py  değişikliğe göre test seçimi
+qa/daemon/     7/24 servis: ajanlar, iş kuyruğu, zamanlayıcı, bulgular, kampanya, HTTP API, web/ panel
+qa/headless/   ekransız paket client: packet.h profili, çerçeveleme, şifreleme, bindings, sahte sunucu
+catalog/       oyun sistemleri kataloğu (kampanya haritası)
+deploy/        FreeBSD rc.d, Linux systemd, Windows servis notları
 .github/       CI
 tests/         pytest (simülatöre karşı)
 ```
@@ -276,6 +331,9 @@ tests/         pytest (simülatöre karşı)
 ## Yol haritası
 
 Hazır: bridge, test runner, oracle, replay, MCP, keşif, değişikliğe göre seçim, CI, çoklu ajan
-(trade/party), otonom keşif ajanı (Gemini). Sıradakiler: çoklu ajanlı otonom keşif, guild/PvP/offline shop
+(trade/party), otonom keşif ajanı (Gemini), 7/24 servis + web panel, kampanya ve bulgu yönetimi, headless
+paket client çerçevesi. Sıradakiler: headless client'ın gerçek sunucuda doğrulanması (kaynak gelince:
+şifreleme, dükkan/ticaret/grup paketleri, harita attr ile yol bulma), çoklu ajanlı otonom keşif,
+guild/PvP/offline shop
 senaryoları, eşzamanlı (race condition) çoklu ajan adımları, gcov ile coverage yönlendirmeli
 senaryo üretimi, görsel assertion'lar, QA client'ta kanal değiştirme.

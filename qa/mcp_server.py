@@ -16,6 +16,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
 
+from .daemon.client import DaemonClient
 from .service import QaService
 
 INSTRUCTIONS = """Metin2 AI QA Player. Gerçek bir QA karakteriyle (AI_QA_*) oyuna girip sistemleri
@@ -29,7 +30,10 @@ normal oyuncu yolundan (login → paket → sunucu → DB) test eder.
 - Setup (item/yang verme) sadece senaryonun `setup` bölümünde; adımlar gerçek oyuncu aksiyonlarıdır.
 - Çoklu ajan (trade/party): senaryoda `agents: {A: {account: AI_QA_001}, B: {account: AI_QA_002}}`,
   adım/assert'lerde `agent: B`. Takas gibi sistemlerde `conservation` assertion'ı ile toplam item/yang
-  korunumunu kontrol et (kopyalama/kayıp)."""
+  korunumunu kontrol et (kopyalama/kayıp).
+- 7/24 servis (QA_DAEMON_URL tanımlıysa): run_* tool'ları işi sunucudaki sürekli açık ajanlara gönderir ve
+  sonucu bekler; list_agents, submit_job/get_job, run_campaign ("her şeyi test et"), get_findings,
+  get_campaign_report ile panelde görülen her şeye erişilir."""
 
 mcp = FastMCP("metin2-qa", instructions=INSTRUCTIONS)
 _svc: QaService | None = None
@@ -40,6 +44,28 @@ def svc() -> QaService:
     if _svc is None:
         _svc = QaService()
     return _svc
+
+
+def daemon() -> DaemonClient | None:
+    """QA_DAEMON_URL tanımlıysa işler 7/24 servisin ajanlarında çalışır."""
+    return DaemonClient.from_env()
+
+
+def _need_daemon() -> DaemonClient:
+    d = daemon()
+    if d is None:
+        raise ValueError("Bu tool 7/24 servis gerektirir: QA_DAEMON_URL (ve gerekiyorsa QA_PANEL_TOKEN) ayarlayın "
+                         "ve sunucuda `metin2-qa daemon` çalıştırın")
+    return d
+
+
+def _job_result(d: DaemonClient, job: dict[str, Any], wait_s: float) -> dict[str, Any]:
+    j = d.wait(job["job_id"], wait_s)
+    out = {"job_id": j["job_id"], "status": j["status"], "result": j.get("result"), "error": j.get("error"),
+           "run_ids": j.get("run_ids"), "agents": j.get("agents")}
+    if j.get("note"):
+        out["note"] = j["note"]
+    return out
 
 
 # ---------------------------------------------------------------------- build / sunucu
@@ -92,7 +118,15 @@ def write_scenario(name: str, yaml_text: str, overwrite: bool = False) -> dict[s
 
 @mcp.tool()
 def run_scenario(name: str, seed: int | None = None) -> dict[str, Any]:
-    """Senaryoyu gerçek QA karakteriyle çalıştırır; yapılandırılmış raporu (failure, evidence ...) döner."""
+    """Senaryoyu gerçek QA karakteriyle çalıştırır; yapılandırılmış raporu (failure, evidence ...) döner.
+    7/24 servis varsa sunucudaki boş ajanlarda çalışır."""
+    d = daemon()
+    if d is not None:
+        res = _job_result(d, d.submit("scenario", {"name": name, "seed": seed}), 900)
+        if res["status"] == "done" and res.get("result", {}).get("run_id"):
+            rep = d.run(res["result"]["run_id"])
+            res["report"] = {k: v for k, v in rep.items() if k not in {"assertions", "steps"}}
+        return res
     rep = svc().run_scenario(name, seed)
     # Adım ve assertion listelerini kısalt; tamamı get_test_result'ta
     return {k: v for k, v in rep.items() if k not in {"assertions", "steps"}} | {
@@ -102,6 +136,9 @@ def run_scenario(name: str, seed: int | None = None) -> dict[str, Any]:
 @mcp.tool()
 def run_suite(tag: str | None = None, seed: int | None = None) -> dict[str, Any]:
     """Tüm senaryoları (veya bir etikettekileri) çalıştırır — regression testi."""
+    d = daemon()
+    if d is not None:
+        return _job_result(d, d.submit("suite", {"tag": tag, "seed": seed}), 3600)
     return svc().run_suite(tag, seed)
 
 
@@ -111,12 +148,18 @@ def run_affected(changed_files: list[str] | None = None, base: str = "HEAD", see
     """Değişen dosyalara göre sadece ilgili senaryoları çalıştırır. changed_files verilmezse kaynak
     repoda `git diff <base>` + izlenmeyen dosyalar kullanılır. Her senaryo için seçilme nedeni döner.
     dry_run=true: sadece hangi senaryoların seçileceğini göster."""
+    d = daemon()
+    if d is not None and not dry_run:
+        return _job_result(d, d.submit("affected", {"files": changed_files, "base": base, "seed": seed}), 3600)
     return svc().run_affected(changed_files, base, seed, dry_run)
 
 
 @mcp.tool()
 def replay_failure(run_id: str, times: int = 3) -> dict[str, Any]:
     """Run'ı aynı senaryo + aynı seed ile N kez tekrar oynatır; 'REPRODUCED k/N' ve trace determinizmi döner."""
+    d = daemon()
+    if d is not None:
+        return _job_result(d, d.submit("replay", {"run_id": run_id, "times": times}), 1800)
     return svc().replay_failure(run_id, times)
 
 
@@ -125,37 +168,45 @@ def replay_failure(run_id: str, times: int = 3) -> dict[str, Any]:
 @mcp.tool()
 def get_test_runs(limit: int = 20, status: str | None = None, scenario: str | None = None) -> list[dict[str, Any]]:
     """Son run'lar (status: PASSED/FAILED/ERROR/RUNNING)."""
-    return svc().get_test_runs(limit, status, scenario)
+    d = daemon()
+    return d.runs(limit, status, scenario) if d is not None else svc().get_test_runs(limit, status, scenario)
 
 
 @mcp.tool()
 def get_test_result(run_id: str) -> dict[str, Any]:
     """Run'ın tam raporu: adımlar, tüm assertion'lar, failure (expected/actual), build, kanıt dosyaları."""
-    return svc().get_test_result(run_id)
+    d = daemon()
+    return d.run(run_id) if d is not None else svc().get_test_result(run_id)
 
 
 @mcp.tool()
 def get_failed_tests(limit: int = 10) -> list[dict[str, Any]]:
     """Son başarısız/hatalı run'lar ve hata detayları."""
+    d = daemon()
+    if d is not None:
+        return d.findings("new,confirmed,flaky,regressed,not_reproduced", limit)
     return svc().get_failed_tests(limit)
 
 
 @mcp.tool()
 def get_trace(run_id: str, tail: int = 200) -> str:
     """Action trace: oyun zamanı, adım, aksiyon, sonuç ve istemci olayları (son N satır)."""
-    return svc().get_trace(run_id, tail)
+    d = daemon()
+    return d.trace(run_id, tail) if d is not None else svc().get_trace(run_id, tail)
 
 
 @mcp.tool()
 def get_server_logs(run_id: str, tail: int = 200) -> str:
     """Run süresince sunucu QA olayları, SYSERR/QA_ASSERT ve yapılandırılmış log dosyaları."""
-    return svc().get_server_logs(run_id, tail)
+    d = daemon()
+    return d.logs(run_id, tail)["server"] if d is not None else svc().get_server_logs(run_id, tail)
 
 
 @mcp.tool()
 def get_client_logs(run_id: str, tail: int = 200) -> str:
     """Run süresince istemci logları."""
-    return svc().get_client_logs(run_id, tail)
+    d = daemon()
+    return d.logs(run_id, tail)["client"] if d is not None else svc().get_client_logs(run_id, tail)
 
 
 @mcp.tool()
@@ -223,7 +274,90 @@ def explore_autonomous(goal: str, max_steps: int | None = None, save_as_scenario
     başına oynar, edge-case arar, bulguları raporlar. save_as_scenario verilirse yürütülen başarılı adımlar
     + kontroller regression senaryosu olarak kaydedilir ve bir kez doğrulama için çalıştırılır.
     Uzun sürebilir (adım sayısıyla orantılı). API anahtarı ortam değişkeninde olmalı (GEMINI_API_KEY)."""
+    d = daemon()
+    if d is not None:
+        return _job_result(d, d.submit("explore", {"goal": goal, "max_steps": max_steps, "save_as": save_as_scenario,
+                                                   "setup": setup, "seed": seed}), 3600)
     return svc().explore_auto(goal, max_steps, save_as_scenario, setup, seed)
+
+
+# ---------------------------------------------------------------------- 7/24 servis (daemon)
+
+@mcp.tool()
+def service_status() -> dict[str, Any]:
+    """7/24 QA servisinin durumu: ajan sayıları, kuyruk, açık bulgular, son kampanya, LLM."""
+    return _need_daemon().status()
+
+
+@mcp.tool()
+def list_agents() -> list[dict[str, Any]]:
+    """Sunucuda sürekli açık AI oyuncular: durum, HP/harita/konum, çalıştığı iş, son hata."""
+    return _need_daemon().agents()
+
+
+@mcp.tool()
+def submit_job(type: str, params: dict[str, Any] | None = None, wait: bool = False,
+               wait_s: float = 600) -> dict[str, Any]:
+    """Servise iş gönder. type: scenario | suite | affected | explore | campaign | replay | confirm.
+    wait=true ise bitmesini bekler (en fazla wait_s)."""
+    d = _need_daemon()
+    job = d.submit(type, params or {})
+    return _job_result(d, job, wait_s) if wait else job
+
+
+@mcp.tool()
+def get_job(job_id: int) -> dict[str, Any]:
+    """İşin durumu, ilerlemesi, run'ları ve sonucu."""
+    return _need_daemon().job(job_id)
+
+
+@mcp.tool()
+def run_campaign(systems: list[str] | None = None, explore: bool | None = None, wait: bool = True,
+                 wait_s: float = 7200) -> dict[str, Any]:
+    """"Her şeyi test et": katalogdaki her sistem (veya verilenler) senaryolarıyla (+ LLM varsa keşifle)
+    test edilir. Sonuç: sistem × durum matrisi, yeni kırmızılar, düzelenler."""
+    d = _need_daemon()
+    params: dict[str, Any] = {}
+    if systems:
+        params["systems"] = systems
+    if explore is not None:
+        params["explore"] = explore
+    job = d.submit("campaign", params)
+    if not wait:
+        return job
+    res = _job_result(d, job, wait_s)
+    cid = (res.get("result") or {}).get("campaign_id")
+    if cid:
+        c = d.campaign(cid)
+        res["matrix"] = {k: {"status": v["status"], "scenarios": [(r["scenario"], r["result"], r["run_id"])
+                                                                  for r in v["scenarios"]]}
+                         for k, v in (c.get("matrix") or {}).items()}
+    return res
+
+
+@mcp.tool()
+def get_findings(status: str | None = "new,confirmed,flaky,regressed,not_reproduced",
+                 limit: int = 50) -> list[dict[str, Any]]:
+    """Tekilleştirilmiş bulgular (durum: new, confirmed, flaky, not_reproduced, regressed, fixed, ignored)."""
+    return _need_daemon().findings(status, limit)
+
+
+@mcp.tool()
+def update_finding(finding_id: int, status: str | None = None, note: str | None = None) -> dict[str, Any]:
+    """Bulgunun durumunu/notunu güncelle (ör. düzeltme commit'ini not olarak yaz)."""
+    return _need_daemon().update_finding(finding_id, status, note)
+
+
+@mcp.tool()
+def get_campaign_report(campaign_id: int | None = None) -> dict[str, Any]:
+    """Kampanya raporu (verilmezse sonuncusu): sistem matrisi, regresyonlar, düzelenler."""
+    d = _need_daemon()
+    if campaign_id is None:
+        items = d.campaigns(1)
+        if not items:
+            return {"note": "Henüz kampanya yok"}
+        campaign_id = items[0]["id"]
+    return d.campaign(campaign_id)
 
 
 def main() -> None:
