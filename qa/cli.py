@@ -71,6 +71,38 @@ def _explore(s, a, ap) -> int:
     return 1 if a.fail_on_findings and bad else 0
 
 
+def _packets(a) -> int:
+    from pathlib import Path
+
+    from .headless.bindings import Bindings
+    from .headless.profile import Profile, import_profile
+
+    if a.packets_cmd == "import":
+        prof = import_profile([Path(x) for x in a.packet_h], [Path(x) for x in a.size_table],
+                              [Path(x) for x in a.defines], a.define, a.name)
+        prof.save(Path(a.output))
+        print(f"Profil yazıldı: {a.output}")
+        a = argparse.Namespace(profile=a.output)
+    prof = Profile.load(Path(a.profile))
+    b = Bindings.for_profile(prof, Path(a.profile))
+    known = [h for h, v in prof.packets.items() if v.get("struct")]
+    print(f"{prof.name}: {len(prof.structs)} struct, {len(prof.packets)} header ({len(known)} tanesinin struct'ı biliniyor)")
+    missing = []
+    for logical, spec in b["packets"].items():
+        for d in ("cg", "gc"):
+            cands = spec.get(d)
+            if not cands:
+                continue
+            cands = cands if isinstance(cands, list) else [cands]
+            hit = next((h for h in cands if h in prof.packets and prof.packets[h].get("struct")), None)
+            print(f"  {'OK ' if hit else 'YOK'} {logical:16} {d.upper()} {hit or ' | '.join(cands)}")
+            if not hit:
+                missing.append(logical)
+    if missing:
+        print(f"Eksik bağlamalar: {sorted(set(missing))} — <profil>.bindings.yaml ile fork adlarını eşleyin")
+    return 0
+
+
 def _daemon(a) -> int:
     import signal
     import threading
@@ -175,6 +207,18 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("sim-server", help="Simülatörü TCP'de sun")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     sub.add_parser("mcp", help="MCP sunucusunu stdio'da başlat")
+    p = sub.add_parser("packets", help="Headless client için paket profili (packet.h'dan)")
+    psub = p.add_subparsers(dest="packets_cmd", required=True)
+    pi = psub.add_parser("import", help="packet.h + boyut tablolarından profil üret")
+    pi.add_argument("--packet-h", action="append", required=True, help="packet.h (birden çok verilebilir)")
+    pi.add_argument("--size-table", action="append", default=[],
+                    help="Client PythonNetworkStream.cpp ve/veya sunucu packet_info.cpp")
+    pi.add_argument("--defines", action="append", default=[], help="Locale_inc.h / CommonDefines.h / service.h")
+    pi.add_argument("--define", action="append", default=[], help="Ek define (AD veya AD=DEGER)")
+    pi.add_argument("--name", default="metin2re")
+    pi.add_argument("-o", "--output", required=True)
+    pinfo = psub.add_parser("info", help="Profil özeti ve headless client uyumluluğu")
+    pinfo.add_argument("profile")
     p = sub.add_parser("daemon", help="7/24 QA servisi + web panel")
     p.add_argument("--host", help="Panel adresi (varsayılan qa.toml [daemon].host)")
     p.add_argument("--port", type=int)
@@ -200,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "daemon":
         return _daemon(a)
+    if a.cmd == "packets":
+        return _packets(a)
     if a.cmd == "campaign":
         return _campaign(a)
 

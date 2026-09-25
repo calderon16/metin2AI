@@ -147,6 +147,9 @@ class HeadlessConfig:
     # Hareket: birim/sn ve adım aralığı (sunucunun hız kontrolüne takılmamak için)
     walk_speed: float = 450.0
     move_interval_ms: int = 250
+    # Konumdan harita numarası: [{index, x, y, width, height}] (sunucudaki map/<ad>/Setting.txt:
+    # BasePosition ve MapSize*25600). Boşsa oyuncu durumunda map = None.
+    maps: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
