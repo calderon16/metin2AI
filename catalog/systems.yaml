@@ -1,0 +1,144 @@
+# Oyun sistemleri kataloğu — "her şeyi test et" kampanyasının haritası.
+#
+# Her sistem için:
+#   tags     : bu sisteme ait senaryoların etiketleri (scenarios/*.yaml `tags:`)
+#   explore  : otonom keşif hedefi (LLM tanımlıysa kampanyada kullanılır)
+#   agents   : keşif için gereken ajan sayısı (şu an keşif tek ajanlı)
+#   covers   : ilgili kaynak dosyalar (bilgi amaçlı; senaryo seçimi `covers:`/selection kurallarıyla yapılır)
+#
+# Senaryosu olmayan sistemler kampanya raporunda "test edilmedi" olarak görünür — neyin eksik olduğu açıkça
+# görülür. Yeni sistem ekledikçe buraya ekleyin ve senaryosunu yazın (Claude: write_scenario).
+
+- id: login
+  name: Giriş / Karakter seçimi
+  tags: [smoke]
+  covers: ["input_login.cpp", "input_auth.cpp", "intro*.py"]
+  explore: >
+    Giriş, karakter seçimi ve oyuna girişi tekrar tekrar dene; yeniden bağlanma (reconnect) sonrası
+    karakterin konumu, yangı ve envanterinin korunduğunu doğrula.
+
+- id: movement
+  name: Hareket / Harita
+  tags: [movement]
+  covers: ["char_state.cpp", "sectree*.cpp"]
+  explore: >
+    Haritada farklı noktalara yürü, NPC ve mob alanlarına git; takılma, ışınlanma ya da konumun sunucu ile
+    tutarsız olması gibi hareket hatalarını ara.
+
+- id: combat
+  name: Savaş
+  tags: [combat]
+  covers: ["char_battle.cpp", "battle.cpp", "char_skill.cpp"]
+  explore: >
+    Yaban Köpeği (101) ve Kurt (102) ile savaş; skill kullan, düşük HP'de iksir iç, öl ve yeniden doğ.
+    Hasar, exp, ölüm ve dirilmenin tutarlı olduğunu kontrol et.
+
+- id: drop
+  name: Drop / Yerden item toplama
+  tags: [drop]
+  covers: ["mob_manager.cpp", "item_manager.cpp", "*drop*"]
+  explore: >
+    Mob keserek drop topla; yerdeki itemlerin envantere doğru adetle girdiğini, envanter doluyken toplama
+    davranışını ve kaybolan item olmadığını kontrol et.
+
+- id: inventory
+  name: Envanter / Ekipman
+  tags: [inventory, equip]
+  covers: ["char_item.cpp", "uiInventory.py"]
+  explore: >
+    Item giy, çıkar, yere at, tekrar al; envanter doluyken ekipman çıkarmayı dene. Item kaybı ya da
+    kopyalanması olmamalı.
+
+- id: item
+  name: Item kullanımı
+  tags: [item]
+  covers: ["char_item.cpp", "item*.cpp"]
+  explore: >
+    İksirleri ve kullanılabilir itemleri kullan; HP'nin max_hp'yi aşmadığını, adetlerin doğru düştüğünü
+    kontrol et.
+
+- id: npc_shop
+  name: NPC dükkanı
+  tags: [shop]
+  covers: ["shop*.cpp", "uiShop.py"]
+  explore: >
+    Genel Mağaza'da (NPC 9001) al-sat yap; yetersiz yang, sınır değerler, art arda alım-satım ve dolu envanter
+    durumlarını dene. Yang eksiye düşmemeli, bedava item olmamalı.
+
+- id: quest
+  name: Görevler
+  tags: [quest]
+  covers: ["quest*.cpp", "questlua*.cpp", "*.quest", "uiQuest.py"]
+  explore: >
+    Köy Muhafızı (NPC 20016) görevini al, tamamla ve ödülü al. İlerleme sayacı, tek seferlik ödül ve görev
+    ortasında ölme/yeniden bağlanma durumlarını test et.
+
+- id: trade
+  name: Ticaret (oyuncular arası)
+  tags: [trade]
+  agents: 2
+  covers: ["exchange*.cpp", "uiExchange.py"]
+
+- id: party
+  name: Grup
+  tags: [party]
+  agents: 2
+  covers: ["party*.cpp", "uiParty.py"]
+
+- id: upgrade
+  name: Item yükseltme (demirci)
+  tags: [upgrade]
+  covers: ["char_item.cpp", "refine*.cpp"]
+
+- id: guild
+  name: Lonca
+  tags: [guild]
+  agents: 2
+  covers: ["guild*.cpp"]
+
+- id: dungeon
+  name: Zindanlar
+  tags: [dungeon]
+  covers: ["dungeon*.cpp", "*.quest"]
+
+- id: pvp
+  name: PvP / Düello
+  tags: [pvp]
+  agents: 2
+  covers: ["pvp*.cpp", "char_battle.cpp"]
+
+- id: offline_shop
+  name: Pazar (offline shop)
+  tags: [offline_shop]
+  agents: 2
+  covers: ["*offline*shop*"]
+
+- id: pet
+  name: Pet
+  tags: [pet]
+  covers: ["*pet*"]
+
+- id: mount
+  name: Binek
+  tags: [mount]
+  covers: ["*horse*", "*mount*"]
+
+- id: fishing
+  name: Balıkçılık
+  tags: [fishing]
+  covers: ["fishing*.cpp"]
+
+- id: mining
+  name: Madencilik
+  tags: [mining]
+  covers: ["mining*.cpp"]
+
+- id: warp_channel
+  name: Işınlanma / Kanal değiştirme
+  tags: [warp, channel]
+  covers: ["*warp*", "input_login.cpp"]
+
+- id: persistence
+  name: Kalıcılık (DB)
+  tags: [persistence]
+  covers: ["db/src/*", "ClientManager*.cpp"]

@@ -27,6 +27,8 @@
 #include "item.h"
 #include "item_manager.h"
 #include "qa_event.h"
+#include "exchange.h"
+#include "party.h"
 
 // Reset sonrası başlangıç noktası (map1 köy merkezi) — sunucunuza göre değiştirin
 static const long QA_START_X = 469300;
@@ -79,6 +81,17 @@ ACMD(do_qa)
 
 	if (!strcmp(arg1, "reset"))
 	{
+		// Kalıcı (7/24) AI oturumlarında önceki testten kalan ticaret/grup sonrakini bozmasın
+		if (ch->GetExchange())
+			ch->GetExchange()->Cancel();
+		if (ch->GetParty())
+		{
+			LPPARTY pParty = ch->GetParty();
+			if (pParty->GetLeaderPID() == ch->GetPlayerID())
+				CPartyManager::instance().DeleteParty(pParty);
+			else
+				pParty->Quit(ch->GetPlayerID());
+		}
 		qa_clear_inventory(ch, true);
 		ch->PointChange(POINT_GOLD, -ch->GetGold());
 		if (ch->GetLevel() != QA_START_LEVEL)

@@ -15,7 +15,8 @@ from .scenario.runner import ScenarioRunner, load_run_report
 from .store.report import failure_signature
 
 
-def replay_run(runner: ScenarioRunner, run_id: str, times: int = 3) -> dict[str, Any]:
+def replay_run(runner: ScenarioRunner, run_id: str, times: int = 3,
+               accounts: list[str] | None = None) -> dict[str, Any]:
     original = load_run_report(runner.store, run_id)
     if original.get("mode") == "explore":
         raise ValueError("Keşif (explore) run'ları doğrudan tekrar oynatılamaz; önce senaryo olarak kaydedin")
@@ -30,7 +31,7 @@ def replay_run(runner: ScenarioRunner, run_id: str, times: int = 3) -> dict[str,
 
     runs = []
     for _ in range(times):
-        rep = runner.run(sc, text, seed=original["seed"], replay_of=run_id, mode="replay")
+        rep = runner.run(sc, text, seed=original["seed"], replay_of=run_id, mode="replay", accounts=accounts)
         s = failure_signature(rep)
         runs.append({
             "run_id": rep["run_id"],

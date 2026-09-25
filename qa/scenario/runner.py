@@ -83,7 +83,8 @@ class RunSession:
         cfg.check_environment()
         self.cfg, self.store = cfg, store
         # Sim modunda tüm ajanlar aynı dünyayı paylaşmalı: run'a özel dünya
-        if factory.is_sim and factory.world is None:
+        self.persistent = bool(getattr(factory, "persistent", False))
+        if factory.is_sim and factory.world is None and not self.persistent:
             factory = BridgeFactory(cfg, SimWorld(password=cfg.accounts.password))
         self.factory = factory
         self.scenario, self.mode = scenario, mode
@@ -154,8 +155,10 @@ class RunSession:
         for a in self.agents.values():
             a.bridge = self.factory.open(a.account, a.index)
             a.bridge.connect()
+            a.bridge.drain_events()  # kalıcı oturumda önceki işten kalan olaylar bu run'a karışmasın
         caps = self.primary.bridge.capabilities
-        if "sim_control" in caps:
+        # Kalıcı (daemon) oturumlarda dünya ortaktır; sıfırlamak diğer ajanları oyundan atar
+        if "sim_control" in caps and not self.persistent:
             self.primary.bridge.call("sim_reset", seed=self.seed, faults=self.faults)
         root_rng = QaRandom(self.seed)
         for a in self.agents.values():
@@ -177,7 +180,8 @@ class RunSession:
         self._t0 = self.primary.ctx.now()
         self._set_step(0)
         for a in self.agents.values():
-            login(a.ctx)
+            if not (self.persistent and a.ctx.state().get("in_game")):
+                login(a.ctx)
 
     def _event_sources(self, caps: set[str]) -> list[EventSource]:
         sc = self.cfg.server
@@ -312,7 +316,7 @@ class RunSession:
         ctx, log = a.ctx, ""
         if ctx is not None and a.bridge is not None:
             try:
-                if ctx.state().get("in_game"):
+                if ctx.state().get("in_game") and not self.persistent:
                     ctx.step = None
                     ctx.act("logout")
             except (ActionError, BridgeError):
@@ -414,11 +418,22 @@ class ScenarioRunner:
         self.factory = factory or BridgeFactory(cfg)
 
     def run(self, sc: Scenario, scenario_text: str | None = None, seed: int | None = None,
-            replay_of: str | None = None, mode: str = "scenario") -> dict[str, Any]:
+            replay_of: str | None = None, mode: str = "scenario",
+            accounts: list[str] | None = None) -> dict[str, Any]:
+        """accounts: senaryodaki ajanları sırayla bu hesaplarla oynat (daemon boştaki ajanları atar)."""
+        agents: dict[str, Any] | None = {k: v.model_dump() for k, v in sc.agents.items()} or None
+        account, character = sc.account, sc.character
+        if accounts:
+            if agents:
+                if len(accounts) < len(agents):
+                    raise ValueError(f"{sc.name} {len(agents)} ajan istiyor, {len(accounts)} verildi")
+                agents = {k: {"account": acc, "character": acc} for k, acc in zip(agents, accounts)}
+            else:
+                account, character = accounts[0], accounts[0]
         s = RunSession(self.cfg, self.store, self.factory, scenario=sc.name, mode=mode,
-                       seed=seed if seed is not None else sc.seed, account=sc.account, character=sc.character,
+                       seed=seed if seed is not None else sc.seed, account=account, character=character,
                        scenario_text=scenario_text, faults=sc.sim_faults, replay_of=replay_of,
-                       agents=sc.agents or None)
+                       agents=agents)
         try:
             try:
                 s.start()

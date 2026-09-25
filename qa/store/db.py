@@ -54,10 +54,29 @@ def utcnow() -> str:
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # Daemon'da birden çok thread aynı bağlantıyı kullanır: tüm erişim tek kilitten geçer
+        self._lock = threading.RLock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+
+    # -- genel yardımcılar (daemon tabloları bunları kullanır)
+    def executescript(self, script: str) -> None:
+        with self._lock:
+            self._db.executescript(script)
+
+    def execute(self, sql: str, args: tuple | list = ()) -> int:
+        with self._lock, self._db:
+            return self._db.execute(sql, args).lastrowid
+
+    def query(self, sql: str, args: tuple | list = ()) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute(sql, args).fetchall()]
+
+    def query_one(self, sql: str, args: tuple | list = ()) -> dict[str, Any] | None:
+        rows = self.query(sql, args)
+        return rows[0] if rows else None
 
     def close(self) -> None:
         self._db.close()
@@ -97,8 +116,7 @@ class Store:
                 )
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        r = self._db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-        return dict(r) if r else None
+        return self.query_one("SELECT * FROM runs WHERE run_id=?", (run_id,))
 
     def list_runs(self, limit: int = 20, status: str | None = None, scenario: str | None = None) -> list[dict[str, Any]]:
         q, args = "SELECT * FROM runs WHERE 1=1", []
@@ -110,13 +128,11 @@ class Store:
             args.append(scenario)
         q += " ORDER BY seq DESC LIMIT ?"
         args.append(int(limit))
-        return [dict(r) for r in self._db.execute(q, args).fetchall()]
+        return self.query(q, args)
 
     def failures(self, run_id: str) -> list[dict[str, Any]]:
-        rows = self._db.execute("SELECT * FROM failures WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
         out = []
-        for r in rows:
-            d = dict(r)
+        for d in self.query("SELECT * FROM failures WHERE run_id=? ORDER BY id", (run_id,)):
             for k in ("expected", "actual"):
                 d[k] = json.loads(d[k]) if d[k] else None
             out.append(d)

@@ -49,7 +49,7 @@ def summarize(report: dict[str, Any]) -> str:
 
 def markdown_summary(results: list[dict[str, Any]], title: str, selection: dict[str, Any] | None = None) -> str:
     """CI özeti (GitHub $GITHUB_STEP_SUMMARY) için markdown tablo."""
-    icon = {"PASSED": "✅", "FAILED": "❌", "ERROR": "⚠️"}
+    icon = {"PASSED": "✅", "FAILED": "❌", "ERROR": "⚠️", "SKIPPED": "⏭️"}
     counts: dict[str, int] = {}
     for r in results:
         counts[r["result"]] = counts.get(r["result"], 0) + 1

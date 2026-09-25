@@ -10,6 +10,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 class ConfigError(Exception):
@@ -102,6 +103,52 @@ class ExplorerConfig:
     history_turns: int = 30
 
 
+def _default_daemon_agents() -> list[dict[str, Any]]:
+    return [{"account": f"AI_QA_00{i}", "keep_online": True} for i in range(1, 5)]
+
+
+@dataclass
+class DaemonConfig:
+    """7/24 çalışan QA servisi (metin2-qa daemon) ve web panel."""
+    host: str = "127.0.0.1"
+    port: int = 8765
+    # Panel/API şifresi bu ortam değişkeninden okunur (dosyaya yazılmaz). 127.0.0.1 dışına
+    # bind edilecekse zorunludur.
+    token_env: str = "QA_PANEL_TOKEN"
+    # [{account, character?, keep_online?, tags?}]
+    agents: list[dict[str, Any]] = field(default_factory=_default_daemon_agents)
+    # [{name, job: {type, ...}, every?: "1h", daily?: "03:00", continuous?: true, enabled?: true}]
+    schedules: list[dict[str, Any]] = field(default_factory=list)
+    max_parallel_jobs: int = 4
+    snapshot_interval_s: float = 3.0
+    reconnect_backoff_s: list[float] = field(default_factory=lambda: [2, 5, 15, 60])
+    # Yeni bulguyu replay ile otomatik doğrula
+    confirm_findings: bool = True
+    confirm_times: int = 3
+    catalog: str = "catalog/systems.yaml"
+
+
+@dataclass
+class HeadlessConfig:
+    """Ekransız paket client (qa/headless) — oyun client'ı olmadan sunucuya gerçek paketlerle bağlanır."""
+    auth_host: str = "127.0.0.1"
+    auth_port: int = 11002
+    # Kanal -> game portu (karakter seçildikten sonra bağlanılan çekirdek)
+    game_host: str = "127.0.0.1"
+    channels: dict[str, int] = field(default_factory=lambda: {"1": 13000})
+    channel: int = 1
+    # `metin2-qa packets import` ile üretilen paket profili (JSON)
+    profile: str = "profiles/metin2re.json"
+    # none | xtea  (fork'un şifrelemesine göre; bkz. qa/headless/crypto.py)
+    crypto: str = "none"
+    # Client'ın login paketinde gönderdiği sürüm/istemci anahtarları (fork'a özel)
+    client_version: int = 0
+    timeout_s: float = 15.0
+    # Hareket: birim/sn ve adım aralığı (sunucunun hız kontrolüne takılmamak için)
+    walk_speed: float = 450.0
+    move_interval_ms: int = 250
+
+
 @dataclass
 class AccountsConfig:
     allowed_prefix: str = "AI_QA_"
@@ -127,6 +174,8 @@ class QaConfig:
     accounts: AccountsConfig = field(default_factory=AccountsConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     explorer: ExplorerConfig = field(default_factory=ExplorerConfig)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
+    headless: HeadlessConfig = field(default_factory=HeadlessConfig)
 
     def resolve(self, p: Path | str) -> Path:
         p = Path(p)
@@ -190,6 +239,8 @@ def load_config(path: Path | str | None = None) -> QaConfig:
             "accounts": cfg.accounts,
             "selection": cfg.selection,
             "explorer": cfg.explorer,
+            "daemon": cfg.daemon,
+            "headless": cfg.headless,
         }
         for key, value in data.items():
             if key in sections:

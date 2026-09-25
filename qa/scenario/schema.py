@@ -238,6 +238,10 @@ class Scenario(BaseModel):
                 raise ValueError(f"{where}: bilinmeyen ajan '{a}' (tanımlı: {sorted(self.agents) or 'yok'})")
         return self
 
+    @property
+    def agent_count(self) -> int:
+        return max(1, len(self.agents))
+
     def agent_specs(self) -> dict[str, AgentSpec]:
         """Tek ajanlı senaryolar için de tek elemanlı ajan listesi döndür."""
         if self.agents:

@@ -1163,6 +1163,13 @@ class SimClient:
         cmd, a = parts[0], parts[1:]
         try:
             if cmd == "reset":
+                # Kalıcı oturumlarda önceki testten kalan ticaret/grup/davet bir sonrakini bozmasın
+                t = self.world.trades.get(p.pid)
+                if t:
+                    self.world.trade_cancel(t, "QA_RESET", p)
+                if p.pid in self.world.parties:
+                    self.world.party_remove(p, "QA_RESET")
+                self.world.party_invites.pop(p.pid, None)
                 p.reset()
                 self.windows.clear()
             elif cmd == "item":
