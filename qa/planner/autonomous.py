@@ -24,7 +24,7 @@ from ..engine import behaviours as _b  # noqa: F401  (BEHAVIOURS registry'i dold
 from ..engine.executor import BEHAVIOURS
 from ..oracle.assertions import describe_assertions
 from ..scenario.loader import load_scenario
-from ..scenario.runner import ScenarioRunner
+from ..scenario.runner import ScenarioRunner, SetupError
 from ..scenario.schema import SETUP_OPS
 from ..session import BridgeFactory
 from ..store.db import Store
@@ -372,7 +372,7 @@ class AutoExplorer:
             if expect_error:
                 raw["expect_error"] = expect_error
             return _step_view(self.explorer.step(run_id, raw))
-        except (ValueError, TypeError, KeyError, yaml.YAMLError) as e:
+        except (ValueError, TypeError, KeyError, SetupError, yaml.YAMLError) as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @staticmethod
