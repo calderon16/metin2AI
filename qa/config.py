@@ -172,6 +172,9 @@ class HeadlessConfig:
     # Ticarete izin verilen oyuncu adları (ör. GM'ler). Boş liste = kısıt yok (test/simülatör).
     # Doluysa AI oyuncu yalnız bunlarla ticaret açar; başkasından gelen ticaret isteği hemen iptal edilir.
     trade_partners: list[str] = field(default_factory=list)
+    # Yol bulma: sunucunun map/<ad>/server_attr dosyalarının kopyası (maps/<ad>/server_attr). Haritanın
+    # [[headless.maps]] kaydında file = "metin2_map_a1" olmalı. Veri yoksa düz çizgide yürünür.
+    nav_dir: str = "maps"
     timeout_s: float = 15.0
     # Hareket: birim/sn ve adım aralığı (sunucunun hız kontrolüne takılmamak için)
     walk_speed: float = 450.0

@@ -56,6 +56,7 @@ class HeadlessClient:
     def __init__(self, cfg: HeadlessConfig, resolve: Callable[[str], Path] = Path,
                  profile: Profile | None = None, bindings: Bindings | None = None):
         self.cfg = cfg
+        self._resolve = resolve
         if profile is None:
             ppath = Path(resolve(cfg.profile))
             profile = Profile.load(ppath)
@@ -90,6 +91,7 @@ class HeadlessClient:
         self.log_lines: list[dict[str, Any]] = []
         self._msg_seq = self._log_seq = 0
         self.dest: tuple[float, float] | None = None
+        self.route: list[tuple[float, float]] = []      # yol bulmanın kalan ara noktaları
         self._next_move = 0.0
         self.target: int | None = None
         self.attacking = False
@@ -329,6 +331,7 @@ class HeadlessClient:
         self.chars.clear()
         self.ground.clear()
         self.dialog, self.dest, self.target, self.attacking = None, None, None, False
+        self.route = []
         self.conn = self._connect(self.cfg.game_host, port)
         self._enter_game_with_key(self._char_index)
         self.log(f"warp tamam: {self.me['name']} → port {port}")
@@ -383,7 +386,7 @@ class HeadlessClient:
 
     def _on_dead(self, vid: int | None) -> None:
         if vid == self.me["vid"]:
-            self.dead, self.attacking, self.dest = True, False, None
+            self.dead, self.attacking, self.dest, self.route = True, False, None, []
             self.event("player_dead")
         elif vid in self.chars:
             self.chars[vid]["dead"] = True
@@ -569,7 +572,13 @@ class HeadlessClient:
             d = math.hypot(dx, dy)
             step = self.cfg.walk_speed * interval
             rot = int((math.degrees(math.atan2(dx, -dy)) % 360) / 5) if d else 0
-            if d <= step:
+            if d <= step and self.route:
+                # ara noktaya varıldı: durmadan sıradakine dön
+                self.me["x"], self.me["y"] = self.dest
+                self.dest = self.route.pop(0)
+                self._send("move", func=funcs["MOVE"], arg=0, rot=rot, x=int(self.me["x"]), y=int(self.me["y"]),
+                           time=self.game_time_ms())
+            elif d <= step:
                 self.me["x"], self.me["y"] = self.dest
                 self.dest = None
                 self._send("move", func=funcs["WAIT"], arg=0, rot=rot, x=int(self.me["x"]), y=int(self.me["y"]),
@@ -793,6 +802,31 @@ class HeadlessClient:
         return {}
 
     # ------------------------------------------------------------------ aksiyonlar
+    def _nav(self, m: dict[str, Any] | None) -> Any:
+        if m is None or not m.get("file"):
+            return None
+        if not hasattr(self, "_navstore"):
+            from .navmesh import NavStore
+
+            root = Path(self.cfg.nav_dir)
+            if not root.is_absolute() and hasattr(self, "_resolve"):
+                root = Path(self._resolve(str(root)))
+            self._navstore = NavStore(root)
+        return self._navstore.grid(m["file"], int(m["x"]), int(m["y"]))
+
+    def _plan_route(self, x: float, y: float, m: dict[str, Any] | None) -> list[tuple[float, float]]:
+        """Sunucunun yürünebilirlik verisiyle engellerin etrafından dolaşan ara noktalar (normal oyuncu gibi;
+        duvardan ya da binadan geçmez). Veri yoksa düz çizgi."""
+        grid = self._nav(m)
+        if grid is None:
+            return [(x, y)]
+        from .navmesh import NavError
+
+        try:
+            return grid.find_path((self.me["x"], self.me["y"]), (x, y))
+        except NavError as e:
+            raise HeadlessError("NO_PATH", str(e)) from e
+
     MAP_EDGE_MARGIN = 300    # harita kenarına bu kadar yaklaşma (sunucu: "Sync: cannot find tree" → bağlantı kesilir)
 
     def _current_map(self) -> dict[str, Any] | None:
@@ -810,7 +844,8 @@ class HeadlessClient:
                 # Gerçek istemci harita dışına yürüyemez; sunucu da haritadan çıkan karakteri atar
                 raise HeadlessError("OUT_OF_MAP", f"Hedef harita dışında: harita {m['index']} sınırları "
                                     f"X {int(x0)}..{int(x1)}, Y {int(y0)}..{int(y1)}")
-        self.dest = (float(x), float(y))
+        route = self._plan_route(float(x), float(y), m)
+        self.dest, self.route = route[0], route[1:]
         self.attacking = False
         self._next_move = 0.0
         return {}
@@ -830,7 +865,7 @@ class HeadlessClient:
         if t is None or t["type"] != "monster" or t.get("dead"):
             raise HeadlessError("NO_TARGET", "Saldırılacak hedef yok")
         self._in_range(t, self.b["attack_range"])
-        self.dest = None
+        self.dest, self.route = None, []
         self.attacking = True
         self._next_attack = 0.0
         self._tick()

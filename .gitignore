@@ -12,3 +12,7 @@ dist/
 training/data/
 training/incoming/
 *.gguf
+
+
+# Sunucudan kopyalanan harita öznitelikleri (metin2-qa: tools ile yenilenir)
+maps/
