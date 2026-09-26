@@ -62,6 +62,8 @@ class _Handler(socketserver.BaseRequestHandler):
             # input_main.cpp Shop: BUY → [adet, sıra], SELL → [hücre], SELL2 → [hücre, adet]
             self.c.extra_sized[self.server.profile.header("HEADER_CG_SHOP")] =                 lambda buf: {1: 2, 2: 1, 3: 2}.get(buf[1], 0)
         self.refining: tuple[int, int] | None = None
+        self.mounts: dict[int, list[int]] = {}    # tür -> [seviye, yem]
+        self.mount_active = 0
 
     def send(self, header: str, **v: Any) -> None:
         self.c.send(header, v)
@@ -141,8 +143,9 @@ class _Handler(socketserver.BaseRequestHandler):
             self.send("HEADER_GC_CHARACTER_POINTS", points=pts)
             self.item(0, 27001, 3)
             if self.player_packets:
-                self.me["items"].update({2: [10, 1], 90: [11200, 1]})   # envanterde kılıç, sırtta zırh
+                self.me["items"].update({2: [10, 1], 90: [11200, 1], 3: [71301, 1]})   # kılıç, zırh, Kurt mühürü
                 self.item(2, 10, 1)
+                self.item(3, 71301, 1)
                 self.item(90, 11200, 1)
         elif name == "HEADER_CG_ENTERGAME":
             self.phase("PHASE_GAME")
@@ -197,6 +200,13 @@ class _Handler(socketserver.BaseRequestHandler):
             self.me["items"][free] = self.me["items"].pop(cell)
             self.item(cell, 0, 0)
             self.item(free, self.me["items"][free][0], 1)
+        elif name == "HEADER_CG_ITEM_USE" and 71300 <= self.me["items"].get(d["Cell"]["cell"], [0])[0] <= 71304:
+            # binek mühürü: ahıra kaydet (sunucudaki MR2Mount::UseItem gibi)
+            cell = d["Cell"]["cell"]
+            kind = self.me["items"].pop(cell)[0] - 71300 + 1
+            self.item(cell, 0, 0)
+            self.mounts[kind] = self.mounts.get(kind) or [1, 0]
+            self.on_mount("list", 0)
         elif name == "HEADER_CG_ITEM_USE":
             cell = d["Cell"]["cell"]
             vnum, count = self.me["items"].get(cell, [0, 0])
@@ -265,6 +275,10 @@ class _Handler(socketserver.BaseRequestHandler):
         elif name == "HEADER_CG_CHAT":
             msg = trailing.split(b"\0", 1)[0].decode("cp1254")
             parts = msg.split()
+            if parts[:1] == ["/target_info"] and len(parts) > 1:
+                return self.on_target_info(int(parts[1]))
+            if parts[:1] == ["/mr2mount"]:
+                return self.on_mount(parts[1] if len(parts) > 1 else "list", int(parts[2]) if len(parts) > 2 else 0)
             if parts[:1] == ["/qa"] and self.name.startswith("AI_QA_"):
                 cmd = parts[1] if len(parts) > 1 else ""
                 with self.w.lock:
@@ -406,6 +420,36 @@ def _handler_extras() -> None:
                 self.me["gold"] += 20 * count
                 self.point(11, self.me["gold"])
 
+    def on_target_info(self, vid: int) -> None:
+        if vid != MOB_VID:
+            return
+        self.chat(f"MR_TI_BEGIN {vid} 101 1 120 20 3 5 0 0", ctype=5)
+        self.chat(f"MR_TI_ITEM {vid} 30000 1 600000", ctype=5)
+        self.chat(f"MR_TI_ITEM {vid} 27001 1 25000", ctype=5)
+        self.chat(f"MR_TI_END {vid} 2", ctype=5)
+
+    def on_mount(self, op: str, kind: int) -> None:
+        if op == "ride" and kind in self.mounts:
+            self.mount_active = kind
+        elif op == "ride":
+            self.chat("Bu bineğe sahip değilsin.")
+        elif op == "dismount":
+            self.mount_active = 0
+        elif op == "feed" and kind in self.mounts:
+            lv, xp = self.mounts[kind]
+            xp += 1
+            if xp >= lv * 2:
+                lv, xp = lv + 1, 0
+            self.mounts[kind] = [lv, xp]
+        rows = []
+        for k in range(1, 6):
+            if k in self.mounts:
+                lv, xp = self.mounts[k]
+                rows.append(f"1:{lv}:{xp}:{lv * 2}:{100 * lv}")
+            else:
+                rows.append("0:0:0:0:0")
+        self.chat(f"MR_MOUNT_LIST {self.mount_active} " + " ".join(rows), ctype=5)
+
     def refine_info(self, cell: int, rtype: int) -> None:
         vnum = self.me["items"].get(cell, [0, 0])[0]
         if vnum != 10:
@@ -436,7 +480,7 @@ def _handler_extras() -> None:
         self.chat("RefineSuceeded", ctype=5)
 
     for fn in (script, mrq, on_quest_answer, on_exchange, shop_packet, open_shop, free_cell, on_shop, refine_info,
-               on_give_item, on_refine):
+               on_give_item, on_refine, on_target_info, on_mount):
         setattr(_Handler, fn.__name__, fn)
 
 

@@ -89,6 +89,8 @@ class HeadlessClient:
         self.refine_window: dict[str, Any] | None = None  # sunucunun açtığı yükseltme penceresi
         self.skills: dict[int, int] = {}                 # beceri vnum -> seviye (GC_SKILL_LEVEL_NEW)
         self._last_click: int | None = None
+        self.target_infos: dict[int, dict[str, Any]] = {}   # MR_TI_*: vid -> düşüş bilgisi
+        self.mounts: dict[str, Any] | None = None             # MR_MOUNT_LIST
         self.whispers: list[dict[str, Any]] = []
         self._wsp_seq = 0
         self.messages: list[dict[str, Any]] = []
@@ -327,6 +329,8 @@ class HeadlessClient:
             ct = self.b["chat_types"]
             if ctype == ct.get("COMMAND", -1) and text.startswith("MRQ_"):
                 self._on_mrq(text)
+            elif ctype == ct.get("COMMAND", -1) and text.startswith("MR_"):
+                self._on_mr2(text)
             if ctype in (ct["INFO"], ct["NOTICE"], ct.get("COMMAND", -1)):
                 self.message(text)
             else:
@@ -478,6 +482,33 @@ class HeadlessClient:
             return bytes.fromhex(h).decode("cp1254", errors="replace")
         except ValueError:
             return ""
+
+    def _on_mr2(self, text: str) -> None:
+        """Metin2Re sistemleri: MR_TI_* (düşüş bilgisi), MR_MOUNT_LIST (binek ahırı)."""
+        p = text.split()
+        try:
+            if p[0] == "MR_TI_BEGIN" and len(p) >= 10:
+                vid = int(p[1])
+                self.target_infos[vid] = {"vid": vid, "race": int(p[2]), "level": int(p[3]), "hp": int(p[4]),
+                                          "exp": int(p[5]), "gold": [int(p[6]), int(p[7])], "rank": int(p[8]),
+                                          "stone": bool(int(p[9])), "items": [], "done": False}
+            elif p[0] == "MR_TI_ITEM" and len(p) >= 5:
+                info = self.target_infos.get(int(p[1]))
+                if info is not None:
+                    info["items"].append({"vnum": int(p[2]), "count": int(p[3]), "ppm": int(p[4])})
+            elif p[0] == "MR_TI_END" and len(p) >= 2:
+                info = self.target_infos.get(int(p[1]))
+                if info is not None:
+                    info["done"] = True
+                    self.event("target_info", vid=info["vid"], items=len(info["items"]))
+            elif p[0] == "MR_MOUNT_LIST" and len(p) >= 2:
+                kinds = []
+                for i, k in enumerate(p[2:], 1):
+                    own, lv, xp, need, bonus = (int(x) for x in k.split(":")[:5])
+                    kinds.append({"kind": i, "own": bool(own), "level": lv, "xp": xp, "need": need, "bonus": bonus})
+                self.mounts = {"active": int(p[1]), "kinds": kinds}
+        except (ValueError, IndexError):
+            self.log(f"MR2 ayrıştırılamadı: {text}")
 
     def _on_mrq(self, text: str) -> None:
         """mr2_qlib.lua'nın istemciye gönderdiği görev komutları (client/Client/mr2quest.py ile aynı biçim)."""
@@ -1170,6 +1201,42 @@ class HeadlessClient:
         slot = next((c for c, v in sorted(self.items.items()) if v["vnum"] == vnum and c < self.b["inventory_size"]),
                     None)
         return {"slot": slot}
+
+    # ------------------------------------------------------------------ Metin2Re sistemleri
+    def _chat_command(self, line: str) -> None:
+        raw = line.encode(self.profile.encoding, errors="replace") + b"\0"
+        self._send("chat", trailing=raw, type=self.b["chat_types"]["TALKING"])
+
+    def cmd_target_info(self, vid: int) -> dict[str, Any]:
+        """Hedef canavarın düşüş bilgisi (istemcideki "?" düğmesi). Sunucu saniyede bir isteğe izin verir."""
+        self._need_game()
+        vid = int(vid)
+        e = self.chars.get(vid)
+        if e is None or e.get("type") != "monster":
+            raise HeadlessError("NO_ENTITY", f"Canavar bulunamadı (VID {vid})")
+        self.target_infos.pop(vid, None)
+        self._chat_command(f"/target_info {vid}")
+        if not self._pump_for(lambda: (self.target_infos.get(vid) or {}).get("done"), 3.0):
+            raise HeadlessError("NO_RESPONSE", "Sunucu düşüş bilgisi göndermedi (sistem kapalı ya da çok sık istek)")
+        return self.target_infos[vid]
+
+    def cmd_get_target_info(self, vid: int) -> dict[str, Any] | None:
+        return self.target_infos.get(int(vid))
+
+    def cmd_mount_command(self, op: str, kind: int = 0) -> dict[str, Any]:
+        self._need_game()
+        if op not in ("list", "ride", "dismount", "feed"):
+            raise HeadlessError("BAD_ARGS", "op: list | ride | dismount | feed")
+        before = self._msg_seq
+        self.mounts = None
+        self._chat_command(f"/mr2mount {op} {int(kind)}" if kind else f"/mr2mount {op}")
+        if not self._pump_for(lambda: self.mounts is not None, 3.0):
+            raise HeadlessError("NO_RESPONSE", "Sunucu binek listesini göndermedi (sistem kapalı olabilir)")
+        msgs = self._msgs_since(before)
+        return {**self.mounts, "messages": [m for m in msgs if not m.startswith("MR_")][-3:]}
+
+    def cmd_get_mounts(self) -> dict[str, Any] | None:
+        return self.mounts
 
     def cmd_split_item(self, slot: int, count: int) -> dict[str, Any]:
         """Yığını böl: count kadarını ilk boş envanter hücresine taşı (istemcide Shift+sürükle, CG_ITEM_MOVE)."""

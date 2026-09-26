@@ -615,6 +615,57 @@ def cmd_unequip_item(a):
 	return {}
 
 
+def _mr2systems():
+	try:
+		import mr2systems
+		return mr2systems
+	except ImportError:
+		return None
+
+
+def cmd_target_info(a):
+	_need_game()
+	vid = int(a["vid"])
+	mod = _mr2systems()
+	if mod is not None:
+		mod.TARGET_INFO.pop(vid, None)
+	net.SendChatPacket("/target_info %d" % vid)
+	return {"pending": True}
+
+
+def cmd_get_target_info(a):
+	mod = _mr2systems()
+	info = mod.TARGET_INFO.get(int(a["vid"])) if mod is not None else None
+	if not info or not info.get("done"):
+		return None
+	items = [{"vnum": v, "count": c, "ppm": p} for (v, c, p) in info["items"]]
+	return {"vid": int(a["vid"]), "race": info["race"], "level": info["level"], "hp": info["hp"], "exp": info["exp"],
+		"gold": list(info["gold"]), "rank": info["rank"], "stone": bool(info["stone"]), "items": items, "done": True}
+
+
+def cmd_mount_command(a):
+	_need_game()
+	op = a.get("op")
+	if op not in ("list", "ride", "dismount", "feed"):
+		raise QaError("BAD_ARGS", "op: list | ride | dismount | feed")
+	kind = int(a.get("kind") or 0)
+	if kind:
+		net.SendChatPacket("/mr2mount %s %d" % (op, kind))
+	else:
+		net.SendChatPacket("/mr2mount %s" % op)
+	return {"pending": True}
+
+
+def cmd_get_mounts(a):
+	mod = _mr2systems()
+	if mod is None or not mod.MOUNT.get("kinds"):
+		return None
+	kinds = []
+	for i, k in enumerate(mod.MOUNT["kinds"]):
+		kinds.append({"kind": i + 1, "own": bool(k[0]), "level": k[1], "xp": k[2], "need": k[3], "bonus": k[4]})
+	return {"active": mod.MOUNT.get("active", 0), "kinds": kinds}
+
+
 def cmd_split_item(a):
 	_need_game()
 	slot, count = int(a["slot"]), int(a["count"])

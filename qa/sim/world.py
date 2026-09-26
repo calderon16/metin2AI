@@ -926,6 +926,36 @@ class SimClient:
         p.inventory[free[0]] = p.equipment.pop(wear_slot)
         return {"slot": free[0]}
 
+    # ------------------------------------------------------------ Metin2Re sistemleri
+    def cmd_target_info(self, vid: int) -> dict[str, Any]:
+        p = self._need_game()
+        e = self._entity(vid)
+        if e.type != "monster":
+            raise SimError("NO_ENTITY", "Bu bir canavar değil")
+        proto = MOBS[e.vnum]
+        items = [{"vnum": v, "count": 1, "ppm": int(pct * 1_000_000)} for v, pct in proto["drops"]]
+        info = {"vid": e.vid, "race": e.vnum, "level": proto.get("level", 1), "hp": proto["hp"], "exp": proto["exp"],
+                "gold": [0, 0], "rank": 0, "stone": False, "done": True,
+                "items": sorted(items, key=lambda i: -i["ppm"])}
+        self._target_infos = getattr(self, "_target_infos", {})
+        self._target_infos[e.vid] = info
+        return info
+
+    def cmd_get_target_info(self, vid: int) -> dict[str, Any] | None:
+        return getattr(self, "_target_infos", {}).get(int(vid))
+
+    def cmd_mount_command(self, op: str, kind: int = 0) -> dict[str, Any]:
+        self._need_game()
+        if op not in ("list", "ride", "dismount", "feed"):
+            raise SimError("BAD_ARGS", "op: list | ride | dismount | feed")
+        if op in ("ride", "feed"):
+            raise SimError("NOT_OWNED", "Simülatörde binek yok")
+        return self.cmd_get_mounts()
+
+    def cmd_get_mounts(self) -> dict[str, Any]:
+        return {"active": 0, "kinds": [{"kind": i, "own": False, "level": 0, "xp": 0, "need": 0, "bonus": 0}
+                                       for i in range(1, 6)], "messages": []}
+
     def cmd_split_item(self, slot: int, count: int) -> dict[str, Any]:
         p = self._need_free()
         s = self._slot(p, slot)

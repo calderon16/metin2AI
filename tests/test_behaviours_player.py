@@ -78,3 +78,37 @@ def test_npc_and_player_are_not_confused():
         B.go_to_npc(ctx, name="TESTR")
     with pytest.raises(BehaviourError, match="PLAYER_NOT_VISIBLE"):
         B.go_to_player(ctx, name="Uzaktaki")
+
+
+class PendingCtx(StubCtx):
+    """Gerçek istemci gibi: eylem {pending} döner, veri birkaç bekleme sonra sorguda belirir."""
+
+    def __init__(self):
+        super().__init__(entities=[{"vid": 7, "type": "monster", "vnum": 101, "name": "Yabani Köpek", "x": 0, "y": 0,
+                                    "distance": 100}])
+        self.ready_at = 900
+        self.mounts = {"active": 0, "kinds": []}
+
+    def act(self, cmd, **args):
+        self.acts.append((cmd, args))
+        if cmd == "mount_command" and args.get("op") == "ride":
+            self.mounts = {"active": args["kind"], "kinds": []}
+        return {"pending": True}
+
+    def query(self, cmd, **args):
+        if cmd == "get_target_info":
+            return {"race": 101, "level": 1, "hp": 120, "exp": 20, "gold": [3, 5],
+                    "items": [{"vnum": 30000, "count": 1, "ppm": 600000}]} if self.t >= self.ready_at else None
+        if cmd == "get_mounts":
+            return self.mounts
+        return None
+
+
+def test_target_info_waits_for_real_client_and_mount_kind_names():
+    ctx = PendingCtx()
+    r = B.target_info(ctx, vnum=101)
+    assert r["vid"] == 7 and r["drops"][0]["chance_pct"] == 60.0
+    assert B.mount_ride(ctx, kind="Kurt")["active"] == 2
+    assert B._mount_kind("beyaz aslan") == 5 and B._mount_kind(3) == 3
+    with pytest.raises(BehaviourError, match="BAD_ARGS"):
+        B._mount_kind("ejderha")

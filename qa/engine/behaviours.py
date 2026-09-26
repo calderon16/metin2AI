@@ -391,6 +391,90 @@ def unequip_item(ctx: GameContext, wear_slot: str) -> dict[str, Any]:
     return r
 
 
+MOUNT_KINDS = {"yaban domuzu": 1, "domuz": 1, "kurt": 2, "kaplan": 3, "aslan": 4, "beyaz aslan": 5}
+
+
+def _poll(ctx: GameContext, query: str, timeout_ms: int = 4000, **args: Any) -> Any:
+    start = ctx.now()
+    while ctx.now() - start < timeout_ms:
+        r = ctx.query(query, **args)
+        if r:
+            return r
+        ctx.wait(300)
+    return None
+
+
+@behaviour("target_info")
+def target_info(ctx: GameContext, vid: int | None = None, vnum: int | None = None, name: str | None = None) -> dict[str, Any]:
+    """Hedef canavarın düşüş bilgisini al (hedef çubuğundaki "?" düğmesi): seviye, HP, EXP, yang ve olası düşüşler."""
+    if vid is None:
+        if name is not None and vnum is None:
+            vnum = _resolve_mob(ctx, None, name)
+        e = _find(ctx, "monster", vnum, None, 15000)
+        if e is None:
+            raise BehaviourError("NOT_FOUND", "Yakında bu canavar yok")
+        vid = e["vid"]
+    r = ctx.act("target_info", vid=vid)
+    if isinstance(r, dict) and r.get("pending"):
+        r = _poll(ctx, "get_target_info", vid=vid)
+        if not r:
+            raise BehaviourError("NO_RESPONSE", "Düşüş bilgisi gelmedi")
+    items = [{"vnum": i["vnum"], "name": npcdir.item_name(i["vnum"]), "count": i["count"],
+              "chance_pct": round(i["ppm"] / 10000.0, 3)} for i in r.get("items", [])]
+    return {"vid": vid, "race": r.get("race"), "level": r.get("level"), "hp": r.get("hp"), "exp": r.get("exp"),
+            "gold": r.get("gold"), "drops": items}
+
+
+def _mount_kind(kind: Any) -> int:
+    if isinstance(kind, int) or (isinstance(kind, str) and kind.isdigit()):
+        k = int(kind)
+    else:
+        k = MOUNT_KINDS.get(npcdir.fold(str(kind or "")), 0)
+    if not 1 <= k <= 5:
+        raise BehaviourError("BAD_ARGS", "kind: 1-5 ya da Yaban Domuzu, Kurt, Kaplan, Aslan, Beyaz Aslan")
+    return k
+
+
+def _mount(ctx: GameContext, op: str, kind: int = 0) -> dict[str, Any]:
+    r = ctx.act("mount_command", op=op, kind=kind)
+    if isinstance(r, dict) and r.get("pending"):
+        ctx.wait(600)
+        r = _poll(ctx, "get_mounts") or {}
+    return r
+
+
+@behaviour("mount_list")
+def mount_list(ctx: GameContext) -> dict[str, Any]:
+    """Binek ahırını göster: hangi binekler evcilleştirildi, seviye, gelişim ve bonus."""
+    return _mount(ctx, "list")
+
+
+@behaviour("mount_ride")
+def mount_ride(ctx: GameContext, kind: str) -> dict[str, Any]:
+    """Ahırdaki bir bineğe bin (kind: Yaban Domuzu, Kurt, Kaplan, Aslan, Beyaz Aslan ya da 1-5)."""
+    k = _mount_kind(kind)
+    r = _mount(ctx, "ride", k)
+    if r.get("active") != k:
+        raise BehaviourError("RIDE_FAILED", "Bineğe binilemedi", messages=r.get("messages"))
+    return r
+
+
+@behaviour("mount_dismount")
+def mount_dismount(ctx: GameContext) -> dict[str, Any]:
+    """Binekten in."""
+    return _mount(ctx, "dismount")
+
+
+@behaviour("mount_feed")
+def mount_feed(ctx: GameContext, kind: str, times: int = 1) -> dict[str, Any]:
+    """Ahırdaki bineğe Binek Yemi ver (seviye atlatır). Yem Seyis'ten alınır."""
+    k = _mount_kind(kind)
+    r: dict[str, Any] = {}
+    for _ in range(max(1, int(times))):
+        r = _mount(ctx, "feed", k)
+    return r
+
+
 @behaviour("split_item")
 def split_item(ctx: GameContext, count: int, vnum: int | None = None, slot: int | None = None) -> dict[str, Any]:
     """Yığından `count` kadarını ayrı bir slota ayır (ör. ticarette yalnız 2 iksir vermek için)."""

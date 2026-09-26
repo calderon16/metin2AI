@@ -1,0 +1,18 @@
+name: real_mount_stable
+description: Gerçek sunucu — evcilleştirme binekleri. Kurt mühürü kullanılır, ahıra kaydolur, bine/yem ver/in.
+tags: [real, mount]
+covers: ["mr2_systems.cpp", "char_item.cpp", "cmd.cpp"]
+account: AI_QA_001
+setup:
+  - give_item: {vnum: 71301, count: 1}
+  - give_item: {vnum: 71310, count: 3}
+steps:
+  - use_item: {vnum: 71301}
+  - mount_list: {}
+  - mount_ride: {kind: Kurt}
+  - mount_feed: {kind: Kurt, times: 2}
+  - mount_dismount: {}
+assert:
+  - alive
+  - item_count: {vnum: 71301, equals: 0}
+  - server_errors: 0

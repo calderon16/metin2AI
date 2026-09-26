@@ -119,3 +119,22 @@ def test_split_stack(b):
     assert inv[0] == 2 and inv[r["slot"]] == 1
     with pytest.raises(ActionError, match="BAD_COUNT"):
         b.call("split_item", slot=0, count=2)
+
+
+def test_target_info_and_mount_stable(b):
+    info = b.call("target_info", vid=200)
+    assert info["race"] == 101 and info["level"] == 1 and info["gold"] == [3, 5]
+    assert [(i["vnum"], i["ppm"]) for i in info["items"]] == [(30000, 600000), (27001, 25000)]
+    assert b.call("get_target_info", vid=200)["done"] is True
+    m = b.call("mount_command", op="list")
+    assert m["active"] == 0 and not any(k["own"] for k in m["kinds"])
+    b.call("use_item", slot=3)                       # Kurt mühürü -> ahıra
+    b.call("wait", ms=300)
+    m = b.call("get_mounts")
+    assert m["kinds"][1]["own"] and m["kinds"][1]["level"] == 1
+    assert b.call("mount_command", op="ride", kind=2)["active"] == 2
+    m = b.call("mount_command", op="feed", kind=2)
+    assert m["kinds"][1]["xp"] == 1
+    assert b.call("mount_command", op="dismount")["active"] == 0
+    r = b.call("mount_command", op="ride", kind=4)   # sahip olunmayan
+    assert r["active"] == 0 and "Bu bineğe sahip değilsin." in r["messages"]

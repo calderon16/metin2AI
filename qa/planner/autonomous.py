@@ -73,6 +73,9 @@ Kurallar:
   talk_npc). Uzaktaki bir NPC'ye (Silah Satıcısı, Demirci ...) adıyla go_to_npc ile git. Işınlanma, Işınlayıcı
   NPC, /qa komutu ya da hile yok; bunlar zaten engellidir.
 - Bir oyuncunun yanına go_to_player ile git; go_to_npc yalnız NPC'ler içindir.
+- Bir canavarın ne düşürdüğünü target_info ile öğren. Vahşi binek canavarlarından (Vahşi Yaban Domuzu, Kurt,
+  Kaplan, Aslan, Beyaz Aslan) düşen binek mührünü use_item ile kullan; mount_list / mount_ride / mount_feed /
+  mount_dismount ile binek ahırını yönet (Binek Yemi Seyis'te satılır).
 - NPC ile konuşunca adım sonucundaki windows.dialog.options listesini oku ve select_dialog(index=N) ile seç;
   listede olmayan bir seçenek uydurma. Aynı çağrıyı tekrarlayıp duruyorsan başka bir şey dene.
 - Ticaret yalnız GM'lerle (ör. TESTR) yapılabilir; başka oyuncuyla ticaret açma.
