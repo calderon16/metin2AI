@@ -136,6 +136,9 @@ class DaemonConfig:
     # Panel/API şifresi bu ortam değişkeninden okunur (dosyaya yazılmaz). 127.0.0.1 dışına
     # bind edilecekse zorunludur.
     token_env: str = "QA_PANEL_TOKEN"
+    # Ajanlara fısıltıyla iş verebilen oyuncular (ör. ["TESTR"]). Başkalarının fısıltıları yok sayılır.
+    owners: list[str] = field(default_factory=list)
+    owner_command_steps: int = 30
     # [{account, character?, keep_online?, tags?}]
     agents: list[dict[str, Any]] = field(default_factory=_default_daemon_agents)
     # [{name, job: {type, ...}, every?: "1h", daily?: "03:00", continuous?: true, enabled?: true}]
@@ -166,6 +169,9 @@ class HeadlessConfig:
     # Yükleme fazında HEADER_CG_CLIENT_VERSION(2) ile gönderilen sürüm (sunucunun CLIENT_VERSION ayarı /
     # istemcinin sabit zaman damgası, ör. 1215955205). 0 = gönderme.
     client_version: int = 0
+    # Ticarete izin verilen oyuncu adları (ör. GM'ler). Boş liste = kısıt yok (test/simülatör).
+    # Doluysa AI oyuncu yalnız bunlarla ticaret açar; başkasından gelen ticaret isteği hemen iptal edilir.
+    trade_partners: list[str] = field(default_factory=list)
     timeout_s: float = 15.0
     # Hareket: birim/sn ve adım aralığı (sunucunun hız kontrolüne takılmamak için)
     walk_speed: float = 450.0

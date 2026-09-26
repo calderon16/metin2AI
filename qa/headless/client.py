@@ -84,6 +84,8 @@ class HeadlessClient:
         self.quests_available: dict[str, dict[str, Any]] = {}
         self.quests_done: set[str] = set()
         self.trade: dict[str, Any] | None = None
+        self.whispers: list[dict[str, Any]] = []
+        self._wsp_seq = 0
         self.messages: list[dict[str, Any]] = []
         self.log_lines: list[dict[str, Any]] = []
         self._msg_seq = self._log_seq = 0
@@ -312,6 +314,8 @@ class HeadlessClient:
             self._on_script(p.trailing)
         elif logical == "exchange":
             self._on_exchange(g)
+        elif logical == "whisper":
+            self._on_whisper(g, p.trailing)
 
     def _do_warp(self) -> None:
         """Yeni çekirdeğe bağlan ve aynı karakterle doğrudan oyuna gir (gerçek istemcinin DirectEnter akışı)."""
@@ -414,6 +418,22 @@ class HeadlessClient:
                        "close": close}
         self.event("window_opened", name="dialog")
 
+    def _on_whisper(self, g: Callable[..., Any], raw: bytes) -> None:
+        text = raw.split(b"\0", 1)[0].decode(self.profile.encoding, errors="replace")
+        wt = self.b["whisper_types"]
+        kind, sender = g("type", 0), g("from", "")
+        if kind == wt["NOT_EXIST"]:
+            self.message(f"{sender} adlı oyuncu çevrimiçi değil")
+            return
+        if kind in (wt["TARGET_BLOCKED"], wt["SENDER_BLOCKED"], wt["ERROR"]):
+            self.message(f"Fısıltı gönderilemedi ({sender})")
+            return
+        self._wsp_seq += 1
+        self.whispers.append({"seq": self._wsp_seq, "t": self.now_ms(), "from": sender, "text": text,
+                              "gm": kind == wt["GM"]})
+        del self.whispers[:-200]
+        self.event("whisper_received", sender=sender)
+
     # ------------------------------------------------------------------ Metin2Re görev motoru (MRQ_*)
     @staticmethod
     def _dehex(h: str) -> str:
@@ -466,6 +486,13 @@ class HeadlessClient:
         if sub == gc["GC_START"]:
             vid = int(g("arg1", 0))
             partner = self.chars.get(vid, {})
+            if not self._trade_allowed(partner.get("name", "")):
+                # Normal oyuncularla ticaret yasak: gelen isteği hemen kapat
+                self.log(f"ticaret reddedildi: {partner.get('name') or vid} izinli değil")
+                self.event("trade_refused", partner_vid=vid, partner_name=partner.get("name", ""))
+                self.trade = None                  # sonraki GC_EXCHANGE paketleri yok sayılır
+                self._send_exchange("CG_CANCEL")
+                return
             self.trade = {"partner_vid": vid, "partner_name": partner.get("name", ""), "my_items": {},
                           "their_items": {}, "my_gold": 0, "their_gold": 0, "my_accepted": False,
                           "their_accepted": False}
@@ -507,6 +534,10 @@ class HeadlessClient:
                 self.event("trade_cancelled", reason="CANCELLED")
             t["completed"] = done
             self._last_trade = t
+
+    def _trade_allowed(self, name: str) -> bool:
+        allowed = [n.lower() for n in (self.cfg.trade_partners or [])]
+        return not allowed or (name or "").lower() in allowed
 
     def _need_trade(self) -> dict[str, Any]:
         if self.trade is None:
@@ -879,6 +910,9 @@ class HeadlessClient:
         e = self.chars.get(int(vid))
         if e is None or e.get("type") != "pc":
             raise HeadlessError("NO_ENTITY", f"Oyuncu bulunamadı (VID {vid})")
+        if not self._trade_allowed(e.get("name", "")):
+            raise HeadlessError("TRADE_FORBIDDEN", f"{e.get('name') or vid} ile ticaret yasak (yalnız: "
+                                f"{', '.join(self.cfg.trade_partners)})")
         self._in_range(e, self.b["trade_range"])
         since = self._msg_seq
         self._send_exchange("CG_START", arg1=int(vid))
@@ -930,6 +964,22 @@ class HeadlessClient:
         self._need_trade()
         self._send_exchange("CG_CANCEL")
         self._pump(300)
+        return {}
+
+    def cmd_get_whispers(self, since: int = 0) -> list[dict[str, Any]]:
+        if self.conn is not None:
+            self._pump(0)
+        return [w for w in self.whispers if w["seq"] > since]
+
+    def cmd_whisper(self, to: str, message: str) -> dict[str, Any]:
+        self._need_game()
+        raw = str(message).encode(self.profile.encoding, errors="replace")[:500] + b"\0"
+        since = self._msg_seq
+        self._send("whisper", trailing=raw, to=str(to))
+        self._pump(200)
+        err = [m["text"] for m in self.messages if m["seq"] > since and str(to) in m["text"]]
+        if err:
+            raise HeadlessError("WHISPER_FAILED", err[-1])
         return {}
 
     def cmd_send_chat(self, message: str) -> dict[str, Any]:

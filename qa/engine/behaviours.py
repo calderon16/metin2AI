@@ -530,6 +530,13 @@ def _trade_window(ctx: GameContext) -> dict[str, Any]:
     return w
 
 
+@behaviour("whisper")
+def whisper(ctx: GameContext, to: str, message: str) -> dict[str, Any]:
+    """Oyuncuya fısıltı gönder (ör. sahibine cevap ya da durum bildirimi)."""
+    ctx.act("whisper", to=to, message=message)
+    return {"to": to}
+
+
 @behaviour("trade_add_item")
 def trade_add_item(ctx: GameContext, vnum: int | None = None, slot: int | None = None) -> dict[str, Any]:
     """Envanterdeki item'i ticaret penceresine koy (yığının tamamı)."""

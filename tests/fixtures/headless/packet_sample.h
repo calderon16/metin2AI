@@ -26,6 +26,7 @@ enum
 	HEADER_CG_SCRIPT_ANSWER = 29,
 	HEADER_CG_TARGET = 61,
 	HEADER_CG_MOVE = 7,
+	HEADER_CG_WHISPER = 19,
 
 	HEADER_GC_HANDSHAKE = 0xff,
 	HEADER_GC_PING = 0x2c,
@@ -46,6 +47,7 @@ enum
 	HEADER_GC_ITEM_GROUND_ADD = 26,
 	HEADER_GC_ITEM_GROUND_DEL = 27,
 	HEADER_GC_SCRIPT = 45,
+	HEADER_GC_WHISPER = 34,
 };
 
 enum EPhases
@@ -327,6 +329,21 @@ typedef struct packet_script
 	BYTE	skin;
 	WORD	src_size;
 } TPacketGCScript;
+
+typedef struct command_whisper
+{
+	BYTE	bHeader;
+	WORD	wSize;
+	char	szNameTo[25];
+} TPacketCGWhisper;
+
+typedef struct packet_whisper
+{
+	BYTE	bHeader;
+	WORD	wSize;
+	BYTE	bType;
+	char	szNameFrom[25];
+} TPacketGCWhisper;
 
 typedef struct command_script_answer
 {

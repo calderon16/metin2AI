@@ -39,6 +39,9 @@ DEFAULT_BINDINGS: dict[str, Any] = {
     "interact_range": 400,
     "attack_interval_ms": 700,
     "script_close_answer": 254,
+    # PythonChat.h: CHAT=0, NOT_EXIST=1, TARGET_BLOCKED=2, SENDER_BLOCKED=3, ERROR=4, GM=5, SYSTEM=0xFF
+    "whisper_types": {"CHAT": 0, "NOT_EXIST": 1, "TARGET_BLOCKED": 2, "SENDER_BLOCKED": 3, "ERROR": 4, "GM": 5,
+                      "SYSTEM": 255},
     # Ticaret (input_main.cpp Exchange / exchange.cpp): EXCHANGE_MAX_DISTANCE ve pencere boyu
     "trade_range": 1000,
     "trade_max_items": 12,
@@ -101,6 +104,8 @@ DEFAULT_BINDINGS: dict[str, Any] = {
         "move": {"cg": ["HEADER_CG_MOVE", "HEADER_CG_CHARACTER_MOVE"], "func": ["bFunc"], "arg": ["bArg"],
                  "rot": ["bRot"], "x": ["lX"], "y": ["lY"], "time": ["dwTime"]},
         "chat": {"cg": ["HEADER_CG_CHAT"], "type": ["type"]},
+        "whisper": {"cg": ["HEADER_CG_WHISPER"], "gc": ["HEADER_GC_WHISPER"], "to": ["szNameTo"],
+                    "from": ["szNameFrom"], "type": ["bType"]},
         "attack": {"cg": ["HEADER_CG_ATTACK"], "type": ["bType"], "vid": ["dwVID", "dwVictimVID"]},
         "target": {"cg": ["HEADER_CG_TARGET"], "vid": ["dwVID"]},
         "item_use": {"cg": ["HEADER_CG_ITEM_USE"], "pos": ["Cell", "pos"]},

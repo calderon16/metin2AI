@@ -38,6 +38,7 @@ class AgentState:
     enabled: bool = False                       # başlatıldı mı (panelden başlat/durdur)
     bridge: Bridge | None = None
     job_id: int | None = None
+    whisper_seq: int = 0
     snapshot: dict[str, Any] = field(default_factory=dict)
     last_error: str | None = None
     connected_at: str | None = None
@@ -94,6 +95,8 @@ class AgentManager:
         self._cond = threading.Condition()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Sahipten (daemon.owners) gelen fısıltı: callback(hesap, gönderen, metin) — Daemon bağlar
+        self.on_owner_whisper: Any = None
         for spec in self.dcfg.agents:
             self.add(spec.get("account"), spec.get("character"), spec.get("keep_online", True),
                      spec.get("tags", []), start=False)
@@ -199,7 +202,16 @@ class AgentManager:
     def _refresh(self, a: AgentState) -> None:
         with self.world_guard():
             st = a.bridge.call("get_player_state")
+            whispers = []
+            if self.dcfg.owners:
+                with contextlib.suppress(Exception):   # eski köprüler get_whispers bilmeyebilir
+                    whispers = a.bridge.call("get_whispers", since=a.whisper_seq)
             a.bridge.drain_events()
+        owners = {o.lower() for o in self.dcfg.owners}
+        for w in whispers:
+            a.whisper_seq = max(a.whisper_seq, int(w.get("seq", 0)))
+            if str(w.get("from", "")).lower() in owners and self.on_owner_whisper is not None:
+                self.on_owner_whisper(a.account, w["from"], w.get("text", ""))
         a.snapshot = {k: st.get(k) for k in ("name", "level", "hp", "max_hp", "gold", "map", "x", "y", "channel",
                                               "dead", "in_game")}
         a.snapshot["updated_at"] = utcnow()
@@ -258,14 +270,15 @@ class AgentManager:
 
     # ------------------------------------------------------------------ kiralama
     def acquire(self, count: int, job_id: int, timeout_s: float = 600.0, cancelled: Any = None,
-                prefer: list[str] | None = None) -> list[AgentState]:
-        """`count` boş (online) ajanı kirala; yoksa bekle. prefer: tercih edilen hesaplar."""
+                prefer: list[str] | None = None, only: list[str] | None = None) -> list[AgentState]:
+        """`count` boş (online) ajanı kirala; yoksa bekle. prefer: tercih edilen, only: yalnız bu hesaplar."""
         deadline = time.monotonic() + timeout_s
         with self._cond:
             while True:
                 if cancelled is not None and cancelled():
                     raise InterruptedError("İş iptal edildi")
-                free = [a for a in self.agents.values() if a.status == "online" and a.enabled]
+                free = [a for a in self.agents.values() if a.status == "online" and a.enabled
+                        and (only is None or a.account in only)]
                 if prefer:
                     free.sort(key=lambda a: (a.account not in prefer, a.account))
                 else:

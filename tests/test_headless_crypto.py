@@ -240,3 +240,20 @@ def test_headless_follows_metin2re_quest_engine(improved_prof):
         b.close()
     finally:
         server.shutdown()
+
+
+def test_headless_trades_only_with_allowed_partners(improved_prof):
+    server = FakeMetin2(improved_prof, improved=True)
+    try:
+        c = HeadlessClient(_cfg(server, crypto="improved", trade_partners=["GM_Ali"]), profile=improved_prof)
+        b = LocalBridge(c.handle, on_close=c.close)
+        b.connect()
+        b.call("login", account="AI_QA_001", password="qa")
+        b.call("select_character", name="AI_QA_001")
+        pc = b.call("get_nearby_entities", type="pc")[0]          # TESTR: listede yok
+        with pytest.raises(Exception, match="TRADE_FORBIDDEN"):
+            b.call("trade_request", vid=pc["vid"])
+        assert server.world.stats.get("trades", 0) == 0
+        b.close()
+    finally:
+        server.shutdown()

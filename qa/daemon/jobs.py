@@ -33,6 +33,7 @@ JOB_TYPES = {
     "replay": "Run'ı tekrar oynat. params: run_id, times?",
     "confirm": "Bulguyu replay ile doğrula. params: finding_id, times?",
     "explore_rotation": "Eğitim verisi için sıradaki keşif hedefi (training/collect_goals.yaml). params: goals?",
+    "owner_command": "Sahibin (daemon.owners) fısıltıyla verdiği iş. params: account, sender, text",
     "learning_cycle": "Veri → eğitim (Kaggle/incoming) → Ollama → değerlendirme → daha iyiyse devreye alma. "
                       "params: base_ollama?, base_unsloth?, min_samples?, gguf?",
 }
@@ -65,9 +66,9 @@ class JobContext:
         self.agents_used |= {a.account for a in agents}
         self.daemon.db.update_job(self.job_id, run_ids=self.run_ids, agents=sorted(self.agents_used))
 
-    def _lease(self, count: int):
+    def _lease(self, count: int, only: list[str] | None = None):
         return self.daemon.agents.lease(count, self.job_id, cancelled=self.cancelled,
-                                        timeout_s=self.daemon.lease_timeout_s)
+                                        timeout_s=self.daemon.lease_timeout_s, only=only)
 
     # ------------------------------------------------------------------ çalıştırıcılar
     def run_scenario(self, name: str, seed: int | None = None, system: str | None = None) -> dict[str, Any]:
@@ -95,13 +96,13 @@ class JobContext:
 
     def explore(self, goal: str, max_steps: int | None = None, save_as: str | None = None,
                 setup: list[Any] | None = None, seed: int | None = None, system: str | None = None,
-                provider: Any = None) -> dict[str, Any]:
+                provider: Any = None, account: str | None = None) -> dict[str, Any]:
         d = self.daemon
         provider = provider or d.make_llm_provider()
         e = d.cfg.explorer
         budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
                                history_turns=e.history_turns)
-        with self._lease(1) as (agents, factory), d.agents.world_guard():
+        with self._lease(1, [account] if account else None) as (agents, factory), d.agents.world_guard():
             out = AutoExplorer(d.cfg, d.store, provider, factory).run(
                 goal, budget=budget, account=agents[0].account, seed=seed, setup=setup,
                 save_as_scenario=save_as, validate=False).to_dict()
@@ -173,6 +174,8 @@ def execute(ctx: JobContext, job_type: str) -> dict[str, Any]:
         return _explore_rotation(ctx, p)
     if job_type == "learning_cycle":
         return _learning_cycle(ctx, p)
+    if job_type == "owner_command":
+        return _owner_command(ctx, p)
     raise ValueError(f"Bilinmeyen iş tipi: {job_type}")
 
 
@@ -194,6 +197,26 @@ def _explore_rotation(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
     ctx.progress(goal=g["id"])
     out = ctx.explore(g["goal"], g.get("steps"), None, g.get("setup") or None)
     return {"goal": g["id"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
+
+
+OWNER_GOAL = """Sahibin {sender} sana (oyundaki karakterin {account}) fısıltıyla şunu yazdı:
+«{text}»
+
+Normal bir Metin2 oyuncusu gibi davran:
+1. Önce whisper ile {sender}'e kısa bir Türkçe onay yaz (ör. "Tamam, hallediyorum.").
+2. İstenen işi oyun içinde normal oyuncu eylemleriyle yap (yürü, konuş, kes, topla, giy...). qa_setup KULLANMA.
+3. İstek bir soruysa (ör. "neredesin", "seviyen kaç") observe ile bak ve whisper ile cevap ver.
+4. Yapamıyorsan ya da istek tehlikeliyse (ticaret, eşya atma) nedenini whisper ile açıkla.
+5. Bitince whisper ile sonucu bildir, sonra finish çağır."""
+
+
+def _owner_command(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
+    """Sahibin fısıltısı: o ajanın kendisiyle (only=[hesap]) LLM keşfi olarak yürütülür."""
+    d = ctx.daemon
+    goal = OWNER_GOAL.format(sender=p["sender"], account=p["account"], text=str(p["text"])[:400])
+    ctx.progress(account=p["account"], text=str(p["text"])[:80])
+    out = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=p["account"])
+    return {"account": p["account"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
 
 
 def _learning_cycle(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:

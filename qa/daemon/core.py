@@ -32,6 +32,7 @@ class Daemon:
         self.db = DaemonDB(self.store)
         self.findings = FindingStore(self.db)
         self.agents = AgentManager(cfg)
+        self.agents.on_owner_whisper = self._on_owner_whisper
         # Sim'de ortak dünya thread-safe değil: işler sırayla
         workers = 1 if self.agents.world is not None else cfg.daemon.max_parallel_jobs
         self.jobs = JobManager(self, workers)
@@ -41,6 +42,16 @@ class Daemon:
         self.started = False
 
     # ------------------------------------------------------------------ LLM
+    def _on_owner_whisper(self, account: str, sender: str, text: str) -> None:
+        """Sahip fısıldadı: o ajana yüksek öncelikli iş. LLM yoksa ajan kısa bir cevapla bildirir."""
+        if not self.llm_available():
+            return
+        try:
+            self.jobs.submit("owner_command", {"account": account, "sender": sender, "text": text},
+                             source=f"whisper:{sender}", priority=10)
+        except ValueError:
+            pass
+
     def llm_available(self) -> bool:
         if self._llm_factory is not None:
             return True

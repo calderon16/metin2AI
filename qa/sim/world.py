@@ -552,6 +552,8 @@ class SimClient:
         self.client_log: list[dict[str, Any]] = []
         self._msg_seq = 0
         self._log_seq = 0
+        self.whispers: list[dict[str, Any]] = []
+        self._wsp_seq = 0
         self._pending_events: list[dict[str, Any]] = []
 
     def close(self) -> None:
@@ -714,6 +716,23 @@ class SimClient:
 
     def cmd_get_client_log(self, since: int = 0) -> list[dict[str, Any]]:
         return [m for m in self.client_log if m["seq"] > since]
+
+    def cmd_get_whispers(self, since: int = 0) -> list[dict[str, Any]]:
+        return [m for m in self.whispers if m["seq"] > since]
+
+    def receive_whisper(self, sender: str, text: str, gm: bool = False) -> None:
+        self._wsp_seq += 1
+        self.whispers.append({"seq": self._wsp_seq, "t": self.world.time_ms, "from": sender, "text": text, "gm": gm})
+        del self.whispers[:-200]
+
+    def cmd_whisper(self, to: str, message: str) -> dict[str, Any]:
+        p = self._need_game()
+        target = next((c for c in self.world.clients if c.player is not None and c.player.name.lower() == str(to).lower()),
+                      None)
+        if target is None:
+            raise SimError("NO_PLAYER", f"'{to}' adlı oyuncu çevrimiçi değil")
+        target.receive_whisper(p.name, str(message))
+        return {}
 
     def cmd_wait(self, ms: int) -> dict[str, Any]:
         self.world.advance(int(ms))

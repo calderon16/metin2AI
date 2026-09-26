@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -268,5 +269,51 @@ def test_quest_id_resolution_helps_small_models():
     assert _resolve_quest(st, "s1_1") == "s1_1"
     assert _resolve_quest(st, "yeni nöbetçi") == "s1_1"                            # başlıkla
     assert _resolve_quest(st, "Köyde sana verilecek yeni bir görev var.") == "s1_1"  # işaretli tek görev
-    with pytest.raises(BehaviourError, match="Geçerli kimlikler: a \(A, active\), b"):
+    with pytest.raises(BehaviourError, match=r"Geçerli kimlikler: a \(A, active\), b"):
         _resolve_quest({"a": {"title": "A", "state": "active"}, "b": {"title": "B", "state": "active"}}, "x")
+
+
+def test_whisper_roundtrip(server, prof):
+    b = _login(server, prof)
+    b.call("whisper", to="TESTR", message="Merhaba sahip")
+    b.call("wait", ms=200)
+    assert server.world.whispers_to_owner == ["Merhaba sahip"]
+    with pytest.raises(ActionError, match="WHISPER_FAILED"):
+        b.call("whisper", to="Yok_Biri", message="x")
+    assert server.owner_whisper("köye dön") == 1
+    b.call("wait", ms=200)
+    w = b.call("get_whispers")
+    assert w[-1]["from"] == "TESTR" and w[-1]["text"] == "köye dön" and w[-1]["gm"] is True
+    assert b.call("get_whispers", since=w[-1]["seq"]) == []
+    b.close()
+
+
+def test_daemon_turns_owner_whisper_into_a_job(server, prof, cfg, tmp_path):
+    from qa.daemon.core import Daemon
+    from qa.planner.llm import ScriptedProvider
+
+    ppath = tmp_path / "fx.json"
+    prof.save(ppath)
+    cfg.bridge.mode = "headless"
+    cfg.headless = _hcfg(server, profile=str(ppath))
+    cfg.daemon.agents = [{"account": "AI_QA_001"}, {"account": "AI_QA_002"}]
+    cfg.daemon.owners = ["TESTR"]
+    cfg.daemon.snapshot_interval_s = 0.2
+    script = [{"name": "whisper", "args": {"to": "TESTR", "message": "Tamam, hallediyorum."}},
+              {"name": "walk_by", "args": {"dx": 100, "dy": 0}},
+              {"name": "whisper", "args": {"to": "TESTR", "message": "Yürüdüm."}},
+              {"name": "finish", "args": {"summary": "istek yapıldı"}}]
+    d = Daemon(cfg, llm_factory=lambda: ScriptedProvider(list(script)))
+    d.start()
+    try:
+        assert d.agents.wait_online(2, 15)
+        assert server.owner_whisper("biraz yürü") == 2        # iki ajana da ulaşır
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and len(server.world.whispers_to_owner) < 4:
+            time.sleep(0.2)
+        jobs = [j for j in d.db.list_jobs(None, 20) if j["type"] == "owner_command"]
+        assert {j["params"]["account"] for j in jobs} == {"AI_QA_001", "AI_QA_002"}
+        assert all(j["source"] == "whisper:TESTR" for j in jobs)
+        assert server.world.whispers_to_owner.count("Tamam, hallediyorum.") == 2
+    finally:
+        d.shutdown()

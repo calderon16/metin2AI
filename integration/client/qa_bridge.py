@@ -425,6 +425,51 @@ def cmd_get_system_messages(a):
 	return [{"seq": s, "type": t, "text": text} for s, t, text in qa.GetChat(a.get("since", 0))]
 
 
+_WHISPERS = []
+_WSP = {"seq": 0, "hooked": False}
+
+
+def _hook_whispers():
+	"""game.GameWindow.OnRecvWhisper'i sar: gelen fısıltıları köprü için biriktir (C++ değişikliği gerekmez)."""
+	if _WSP["hooked"]:
+		return
+	try:
+		import game
+	except ImportError:
+		return
+	orig = getattr(game.GameWindow, "OnRecvWhisper", None)
+	if orig is None:
+		return
+
+	def OnRecvWhisper(self, mode, name, line):
+		try:
+			text = line
+			if " : " in line:
+				text = line.split(" : ", 1)[1]
+			_WSP["seq"] += 1
+			_WHISPERS.append({"seq": _WSP["seq"], "from": name, "text": text, "gm": mode == 5})
+			del _WHISPERS[:-200]
+		except Exception:
+			pass
+		return orig(self, mode, name, line)
+
+	game.GameWindow.OnRecvWhisper = OnRecvWhisper
+	_WSP["hooked"] = True
+
+
+def cmd_get_whispers(a):
+	_hook_whispers()
+	since = a.get("since", 0)
+	return [w for w in _WHISPERS if w["seq"] > since]
+
+
+def cmd_whisper(a):
+	_need_game()
+	_hook_whispers()
+	net.SendWhisperPacket(json.encode_cp1254(a["to"]), json.encode_cp1254(a["message"]))
+	return {}
+
+
 def cmd_get_client_log(a):
 	try:
 		f = open("syserr.txt", "r")

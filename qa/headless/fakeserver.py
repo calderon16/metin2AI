@@ -31,6 +31,8 @@ class FakeWorld:
     def __init__(self, password: str = "qa"):
         self.password = password
         self.lock = threading.Lock()
+        self.whispers_to_owner: list[str] = []
+        self.handlers: list[Any] = []
         self.stats = {"moves": 0, "speed_violations": 0, "attacks": 0, "pongs": 0, "logins": 0,
                       "key_agreements": 0, "seq_packets": 0, "seq_errors": 0}
 
@@ -46,6 +48,8 @@ class _Handler(socketserver.BaseRequestHandler):
         self.me = {"x": 5000, "y": 5000, "gold": 0, "hp": 400, "items": {0: [27001, 3]}}
         self.name = ""
         self.seq_index = 0
+        with self.w.lock:
+            self.w.handlers.append(self)
         self.quest_step = ""
         self.pending = None
         self.trade = None
@@ -184,6 +188,13 @@ class _Handler(socketserver.BaseRequestHandler):
                 self.script("Merhaba yolcu![ENTER]Ne istersin?[QUESTION 1;Görev ver|2;Hoşça kal][DONE]")
         elif name == "HEADER_CG_EXCHANGE":
             self.on_exchange(d)
+        elif name == "HEADER_CG_WHISPER":
+            to = d.get("szNameTo", "")
+            if to.lower() == "testr":
+                with self.w.lock:
+                    self.w.whispers_to_owner.append(trailing.split(b"\0", 1)[0].decode("cp1254"))
+            else:
+                self.c.send("HEADER_GC_WHISPER", {"bType": 1, "szNameFrom": to}, b"\0")
         elif name == "HEADER_CG_SCRIPT_ANSWER":
             self.chat(f"cevap {d['answer']}")
             self.on_quest_answer(d["answer"])
@@ -195,6 +206,10 @@ class _Handler(socketserver.BaseRequestHandler):
                 if cmd == "gold":
                     self.me["gold"] = int(parts[2])
                     self.point(11, self.me["gold"])
+                elif cmd == "owner_says":
+                    # TESTR (GM) ajana fısıldar
+                    raw = " ".join(parts[2:]).encode("cp1254") + b"\0"
+                    self.c.send("HEADER_GC_WHISPER", {"bType": 5, "szNameFrom": "TESTR"}, raw)
                 elif cmd == "quest":
                     # görev teklifi: mektup + alınabilir işareti
                     self.quest_step = "offered"
@@ -308,6 +323,18 @@ class FakeMetin2:
     @property
     def game_port(self) -> int:
         return self.game.server_address[1]
+
+    def owner_whisper(self, text: str, sender: str = "TESTR") -> int:
+        """Oyundaki (oyun sunucusuna bağlı) herkese sahibin fısıltısı; ulaşılan oyuncu sayısı."""
+        n = 0
+        for h in list(self.world.handlers):
+            if h.server.kind == "game" and h.name:
+                try:
+                    h.c.send("HEADER_GC_WHISPER", {"bType": 5, "szNameFrom": sender}, text.encode("cp1254") + b"\0")
+                    n += 1
+                except Exception:  # noqa: BLE001 — kapanmış bağlantı
+                    pass
+        return n
 
     def shutdown(self) -> None:
         for s in (self.auth, self.game):

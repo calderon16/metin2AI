@@ -33,6 +33,7 @@ STATE_COMMANDS: dict[str, str] = {
     "get_quest_state": "Görev durumları",
     "get_party": "Grup: in_party, leader_vid, is_leader, members[]",
     "get_system_messages": "Sistem/chat mesajları. args: since?",
+    "get_whispers": "Gelen fısıltılar. args: since? — [{seq, t, from, text, gm}]",
     "get_client_log": "İstemci log satırları. args: since?",
     "screenshot": "Ekran görüntüsü. yanıt: {format:'png', base64} veya {path}",
     "wait": "args: ms — istemci ms kadar oyun zamanı geçtikten sonra yanıt verir",
@@ -59,6 +60,7 @@ ACTION_COMMANDS: dict[str, str] = {
     "buy_item": "args: slot (shop slotu)",
     "sell_item": "args: slot, count?",
     "send_chat": "args: message",
+    "whisper": "args: to (oyuncu adı), message — fısıltı gönder",
     "respawn": "args: here? (true: olduğun yerde)",
     "change_channel": "args: channel",
     # Ticaret (Metin2 exchange: istek iki tarafta pencereyi hemen açar)
