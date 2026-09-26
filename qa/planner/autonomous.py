@@ -40,8 +40,8 @@ HIDDEN_PARAMS = {"timeout_ms", "search_radius", "radius", "potion_below_pct", "p
 NOISY_EVENTS = {"damage_dealt", "damage_taken"}
 # Tek ajanlı keşifte işe yaramayanlar (çok oyunculu aksiyonlar, modelin göremediği ekran görüntüsü) —
 # her istekte gönderilen araç listesini kısa tutar
-EXCLUDED_BEHAVIOURS = {"trade_with", "trade_add_item", "trade_set_gold", "trade_accept", "trade_cancel",
-                       "party_invite", "party_kick", "party_accept", "party_decline", "party_leave",
+# Ticaret tek ajanla gerçek bir oyuncuya (ör. TESTR) yapılabilir; grup komutları headless'ta henüz yok
+EXCLUDED_BEHAVIOURS = {"party_invite", "party_kick", "party_accept", "party_decline", "party_leave",
                        "screenshot", "wait_for_event"}
 
 SYSTEM_PROMPT = """Sen bir Metin2 QA mühendisisin. Gerçek bir QA karakterini (AI_QA_*) oyunda oynatarak
@@ -257,6 +257,11 @@ class AutoExplorer:
                                         "nearby": start["nearby"]}), ensure_ascii=False)
             + "\n\nPlanını kısaca düşün, sonra tool çağrılarıyla test etmeye başla."))
         history: list[Message] = [first]
+        # Tur 0: eğitim verisi (training/export_dataset.py) modelin gördüğü bağlamı birebir kurabilsin
+        transcript.write(json.dumps({"turn": 0, "system": system, "user": first.text, "goal": goal,
+                                     "provider": self.provider.name, "model": self.provider.model,
+                                     "max_steps": b.max_steps, "history_turns": b.history_turns},
+                                    ensure_ascii=False) + "\n")
         findings: list[dict[str, Any]] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
         steps = turns = idle = 0
@@ -317,7 +322,7 @@ class AutoExplorer:
                     "turn": turns, "text": reply.message.text,
                     "calls": [{"name": c.name, "args": c.args} for c in calls],
                     "results": [{"name": r.name, "content": r.content} for r in results],
-                    "usage": reply.usage}, ensure_ascii=False, default=str) + "\n")
+                    "note": note, "usage": reply.usage}, ensure_ascii=False, default=str) + "\n")
                 transcript.flush()
                 if finished:
                     stop_reason = "finished"

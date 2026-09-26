@@ -8,8 +8,10 @@ Gerçek sunucuda işler paralel; sim modunda ortak dünya tek kilitle sırayla k
 
 from __future__ import annotations
 
+import json
 import threading
 import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..planner.autonomous import AutoExplorer, ExploreBudget
@@ -30,6 +32,9 @@ JOB_TYPES = {
     "campaign": "Her şeyi test et. params: systems?, explore?, seed?, explore_steps?",
     "replay": "Run'ı tekrar oynat. params: run_id, times?",
     "confirm": "Bulguyu replay ile doğrula. params: finding_id, times?",
+    "explore_rotation": "Eğitim verisi için sıradaki keşif hedefi (training/collect_goals.yaml). params: goals?",
+    "learning_cycle": "Veri → eğitim (Kaggle/incoming) → Ollama → değerlendirme → daha iyiyse devreye alma. "
+                      "params: base_ollama?, base_unsloth?, min_samples?, gguf?",
 }
 
 
@@ -89,9 +94,10 @@ class JobContext:
         return rep
 
     def explore(self, goal: str, max_steps: int | None = None, save_as: str | None = None,
-                setup: list[Any] | None = None, seed: int | None = None, system: str | None = None) -> dict[str, Any]:
+                setup: list[Any] | None = None, seed: int | None = None, system: str | None = None,
+                provider: Any = None) -> dict[str, Any]:
         d = self.daemon
-        provider = d.make_llm_provider()
+        provider = provider or d.make_llm_provider()
         e = d.cfg.explorer
         budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
                                history_turns=e.history_turns)
@@ -163,7 +169,52 @@ def execute(ctx: JobContext, job_type: str) -> dict[str, Any]:
             raise ValueError("Bu bulgu keşiften geliyor; doğrulamak için önce senaryo olarak kaydedin")
         res = ctx.replay(f["last_run_id"], int(p.get("times", d.cfg.daemon.confirm_times)))
         return {"status": d.findings.record_confirmation(f["id"], res), "verdict": res["verdict"]}
+    if job_type == "explore_rotation":
+        return _explore_rotation(ctx, p)
+    if job_type == "learning_cycle":
+        return _learning_cycle(ctx, p)
     raise ValueError(f"Bilinmeyen iş tipi: {job_type}")
+
+
+def _explore_rotation(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
+    """Veri toplama: hedef listesinde sırayla bir sonraki keşif (sıra artifacts/daemon/rotation.json'da)."""
+    import yaml
+
+    d = ctx.daemon
+    path = d.cfg.resolve(Path(p.get("goals", "training/collect_goals.yaml")))
+    goals = yaml.safe_load(path.read_text(encoding="utf-8"))["goals"]
+    state_file = d.cfg.resolve(d.cfg.artifacts_dir) / "daemon" / "rotation.json"
+    try:
+        idx = json.loads(state_file.read_text(encoding="utf-8")).get("next", 0)
+    except (OSError, ValueError):
+        idx = 0
+    g = goals[idx % len(goals)]
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps({"next": (idx + 1) % len(goals), "last": g["id"]}), encoding="utf-8")
+    ctx.progress(goal=g["id"])
+    out = ctx.explore(g["goal"], g.get("steps"), None, g.get("setup") or None)
+    return {"goal": g["id"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
+
+
+def _learning_cycle(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
+    """training/cycle.py: değerlendirme keşifleri bu işin kiraladığı ajanla koşar (oyundaki ajanlar atılmaz)."""
+    import sys
+
+    d = ctx.daemon
+    root = str(d.cfg.resolve(Path(".")))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from training.cycle import run_cycle
+
+    def explore_fn(goal: dict[str, Any], provider: Any) -> dict[str, Any]:
+        ctx.check_cancel()
+        return ctx.explore(goal["goal"], goal.get("steps"), None, goal.get("setup") or None, provider=provider)
+
+    def artifacts_of(run_id: str) -> Path | None:
+        run = d.store.get_run(run_id)
+        return Path(run["artifacts_dir"]) if run else None
+
+    return run_cycle(p, explore_fn, artifacts_of, log=lambda m: ctx.progress(last=m[:200]), should_stop=ctx.cancelled)
 
 
 class JobManager:

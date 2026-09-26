@@ -7,3 +7,8 @@ artifacts/
 qa.local.toml
 build/lib/
 dist/
+
+# Eğitim verisi ve indirilen modeller (büyük; oyun kayıtlarından türetilir)
+training/data/
+training/incoming/
+*.gguf

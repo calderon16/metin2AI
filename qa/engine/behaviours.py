@@ -468,11 +468,18 @@ def screenshot(ctx: GameContext, label: str = "shot") -> dict[str, Any]:
 
 # ------------------------------------------------------------------ çoklu ajan: ticaret
 
-def _player_vid(ctx: GameContext, agent: str | None, vid: int | None) -> int:
+def _player_vid(ctx: GameContext, agent: str | None, vid: int | None, name: str | None = None) -> int:
     if agent is not None:
         return ctx.peer_vid(agent)
+    if name is not None:
+        # Gerçek oyuncu (ör. TESTR): yakındaki oyuncular arasında adla bul
+        pcs = [e for e in ctx.query("get_nearby_entities", radius=10000, type="pc")
+               if str(e.get("name", "")).lower() == name.lower()]
+        if not pcs:
+            raise BehaviourError("NO_ENTITY", f"Yakında '{name}' adlı oyuncu yok")
+        return pcs[0]["vid"]
     if vid is None:
-        raise BehaviourError("BAD_ARGS", "agent veya vid gerekli")
+        raise BehaviourError("BAD_ARGS", "agent, name veya vid gerekli")
     return vid
 
 
@@ -488,10 +495,10 @@ def _wait_window(ctx: GameContext, name: str, timeout_ms: int) -> dict[str, Any]
 
 
 @behaviour("trade_with")
-def trade_with(ctx: GameContext, agent: str | None = None, vid: int | None = None,
+def trade_with(ctx: GameContext, agent: str | None = None, vid: int | None = None, name: str | None = None,
                timeout_ms: int = 10000) -> dict[str, Any]:
-    """Oyuncuya (başka bir ajan veya vid) yaklaş ve ticaret başlat."""
-    target = _player_vid(ctx, agent, vid)
+    """Oyuncuya (başka bir ajan, oyuncu adı ya da vid) yaklaş ve ticaret başlat."""
+    target = _player_vid(ctx, agent, vid, name)
     move_to_entity(ctx, vid=target, type="pc", range=500)
     ctx.act("trade_request", vid=target)
     ctx.react()

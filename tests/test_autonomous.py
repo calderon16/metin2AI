@@ -27,11 +27,11 @@ def _explorer(service, script):
 def test_tool_schemas():
     tools = {t.name: t for t in behaviour_tools() + meta_tools()}
     assert {"kill_monster", "buy_item", "check", "finish", "report_finding", "qa_setup"} <= set(tools)
-    assert "trade_with" not in tools
+    assert "trade_with" in tools and "name" in tools["trade_with"].parameters["properties"]   # gerçek oyuncuyla ticaret
     km = tools["kill_monster"].parameters
     assert km["properties"]["vnum"]["type"] == "integer" and km["required"] == ["vnum"]
     assert "auto_potion" not in km["properties"]
-    assert {"wait_for_event", "screenshot", "trade_with", "party_invite"}.isdisjoint(tools)
+    assert {"wait_for_event", "screenshot", "party_invite"}.isdisjoint(tools)
     assert all("expect_error" in t.parameters["properties"] for t in behaviour_tools())
     assert all(n.replace("_", "").isalnum() for n in tools)
 

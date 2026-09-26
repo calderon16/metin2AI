@@ -67,7 +67,8 @@ class _Handler(socketserver.BaseRequestHandler):
         self.send("HEADER_GC_ITEM_SET", Cell={"window_type": 1, "cell": cell}, vnum=vnum, count=count)
 
     def handle(self) -> None:
-        self.send("HEADER_GC_HANDSHAKE", dwHandshake=HANDSHAKE, dwTime=int(time.time()), lDelta=0)
+        self.hs_time = int(time.time() * 1000) & 0xFFFFFFFF
+        self.send("HEADER_GC_HANDSHAKE", dwHandshake=HANDSHAKE, dwTime=self.hs_time, lDelta=0)
         try:
             while True:
                 for p in self.c.poll(0.2):
@@ -144,6 +145,9 @@ class _Handler(socketserver.BaseRequestHandler):
             step = ((d["lX"] - self.me["x"]) ** 2 + (d["lY"] - self.me["y"]) ** 2) ** 0.5
             with self.w.lock:
                 self.w.stats["moves"] += 1
+                # gerçek sunucu: dwCurTime - dwTime >= 30000 → "SPEEDHACK: slow timer"
+                skew = abs((int(time.time() * 1000) & 0xFFFFFFFF) - int(d.get("dwTime", 0))) if "dwTime" in d else 0
+                self.w.stats["max_time_skew_ms"] = max(self.w.stats.get("max_time_skew_ms", 0), skew)
                 if step > MAX_STEP:
                     self.w.stats["speed_violations"] += 1
             self.me["x"], self.me["y"] = d["lX"], d["lY"]

@@ -98,6 +98,14 @@ class HeadlessClient:
         self._char_index: int | None = None
         self._pending_warp: tuple[int, int, int] | None = None   # (port, x, y)
 
+    def game_time_ms(self) -> int:
+        """Sunucunun el sıkışmada verdiği saate göre istemci saati (CG_MOVE dwTime). Gerçek istemci gibi sunucu
+        saatine yakın kalır; aksi halde sunucu 'SPEEDHACK: slow timer' kaydı düşer."""
+        base = getattr(self, "_server_clock", None)
+        if base is None:
+            return self.now_ms()
+        return (base[0] + int((time.monotonic() - base[1]) * 1000)) & 0xFFFFFFFF
+
     def now_ms(self) -> int:
         return int((time.monotonic() - self._t0) * 1000)
 
@@ -212,6 +220,10 @@ class HeadlessClient:
             first = self.profile.structs[self.profile.resolve(self.profile.struct_for(h))].fields[0].name
             vals.pop(first, None)
             self.conn.send(h, vals)
+            # Sunucu, yansıtılan dwTime'ı istemci saati kabul eder; hareket paketleri aynı saatle gitmeli
+            t = vals.get("dwTime")
+            if isinstance(t, int):
+                self._server_clock = (t, time.monotonic())
         elif logical == "warp":
             self._pending_warp = (int(g("port", 0)), int(g("x", 0)), int(g("y", 0)))
             self.log(f"warp → port {self._pending_warp[0]} ({self._pending_warp[1]}, {self._pending_warp[2]})")
@@ -530,12 +542,12 @@ class HeadlessClient:
                 self.me["x"], self.me["y"] = self.dest
                 self.dest = None
                 self._send("move", func=funcs["WAIT"], arg=0, rot=rot, x=int(self.me["x"]), y=int(self.me["y"]),
-                           time=self.now_ms())
+                           time=self.game_time_ms())
             else:
                 self.me["x"] += dx / d * step
                 self.me["y"] += dy / d * step
                 self._send("move", func=funcs["MOVE"], arg=0, rot=rot, x=int(self.me["x"]), y=int(self.me["y"]),
-                           time=self.now_ms())
+                           time=self.game_time_ms())
             self._next_move = now + interval
         if self.attacking and now >= self._next_attack:
             t = self.chars.get(self.target or -1)
@@ -750,8 +762,23 @@ class HeadlessClient:
         return {}
 
     # ------------------------------------------------------------------ aksiyonlar
+    MAP_EDGE_MARGIN = 300    # harita kenarına bu kadar yaklaşma (sunucu: "Sync: cannot find tree" → bağlantı kesilir)
+
+    def _current_map(self) -> dict[str, Any] | None:
+        x, y = self.me["x"], self.me["y"]
+        return next((m for m in self.cfg.maps
+                     if m["x"] <= x < m["x"] + m["width"] and m["y"] <= y < m["y"] + m["height"]), None)
+
     def cmd_move_to(self, x: float, y: float) -> dict[str, Any]:
         self._need_alive()
+        m = self._current_map()
+        if m is not None:
+            e = self.MAP_EDGE_MARGIN
+            x0, y0, x1, y1 = m["x"] + e, m["y"] + e, m["x"] + m["width"] - e, m["y"] + m["height"] - e
+            if not (x0 <= float(x) <= x1 and y0 <= float(y) <= y1):
+                # Gerçek istemci harita dışına yürüyemez; sunucu da haritadan çıkan karakteri atar
+                raise HeadlessError("OUT_OF_MAP", f"Hedef harita dışında: harita {m['index']} sınırları "
+                                    f"X {int(x0)}..{int(x1)}, Y {int(y0)}..{int(y1)}")
         self.dest = (float(x), float(y))
         self.attacking = False
         self._next_move = 0.0

@@ -1,0 +1,32 @@
+# Sabit değerlendirme seti: model kıyaslaması (tools/../training/evaluate.py) ve eğitilen modelin
+# "eskisinden iyi mi" kararı bu hedeflerle ölçülür. Hedefleri değiştirmek eski skorlarla karşılaştırmayı
+# bozar; yeni hedef eklerken yeni bir set adı (set:) verin.
+set: metin2re-v1
+goals:
+  - id: quest_accept
+    goal: >
+      Köyde sana verilecek yeni bir görev var. Önce observe ile görevlerine bak (state "available" olan görevin
+      target alanı görevi veren NPC'dir). O NPC'ye git, konuş, menüden görevin adını seç ve görevi kabul et.
+      Sonra görevin işaret ettiği ilk NPC'ye git ve konuş. Bitince finish çağır.
+    steps: 20
+    setup:
+      - quest_reset: mr2_s1_1
+    check: {type: quest_state, quest: s1_1, states: [active, ready, done]}
+
+  - id: hunt_loot
+    goal: >
+      Köyün dışına çık, yakındaki canavarları bul ve kes (en az 3 tane), düşen eşyaları topla. HP yarının
+      altına düşerse envanterdeki kırmızı iksiri (27001) kullan. Anormal bir şey görürsen report_finding ile
+      bildir. Bitince finish çağır.
+    steps: 25
+    setup:
+      - give_item: {vnum: 27001, count: 20}
+    check: {type: tool_ok, tools: [kill_monster, kill_until_drop], min: 2}
+
+  - id: npc_menus
+    goal: >
+      Köydeki en az 3 farklı NPC ile konuş. Her birinin menüsündeki seçenekleri incele, açılan pencereleri
+      düzgün kapat. Menü metni bozuk ya da seçenek çalışmıyorsa report_finding ile bildir. Bitince finish çağır.
+    steps: 20
+    setup: []
+    check: {type: distinct_args, tool: talk_npc, keys: [vnum, vid], min: 3}

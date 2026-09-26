@@ -139,6 +139,7 @@ def test_headless_walks_like_a_player(server, prof):
     b.call("wait", ms=2200)
     assert b.call("get_player_state")["x"] == 7000
     assert server.world.stats["moves"] >= 10 and server.world.stats["speed_violations"] == 0
+    assert server.world.stats["max_time_skew_ms"] < 30000       # hareket saati sunucu saatine yakın
     b.close()
 
 
@@ -216,3 +217,44 @@ def test_bulk_jobs_only_pick_scenarios_for_the_bridge_mode(cfg, monkeypatch):
     assert names() == {"real_walk", "real_quest"}           # needs_client (görsel) hariç
     cfg.bridge.mode = "tcp"
     assert names() == {"real_walk", "real_gui", "real_quest"}
+
+
+def test_daemon_learning_jobs(server, prof, cfg, tmp_path, monkeypatch):
+    """Veri toplama rotasyonu sırayla ilerler; öğrenme döngüsü az veride eğitime geçmez."""
+    from qa.daemon.core import Daemon
+    from qa.planner.llm import ScriptedProvider
+
+    ppath = tmp_path / "fx.json"
+    prof.save(ppath)
+    cfg.bridge.mode = "headless"
+    cfg.headless = _hcfg(server, profile=str(ppath))
+    cfg.daemon.agents = [{"account": "AI_QA_001"}]
+    cfg.daemon.snapshot_interval_s = 0.2
+    goals = tmp_path / "goals.yaml"
+    goals.write_text("goals:\n  - {id: g1, goal: yürü, steps: 3}\n  - {id: g2, goal: bak, steps: 3}\n", encoding="utf-8")
+    script = [{"name": "walk_by", "args": {"dx": 100, "dy": 0}}, {"name": "finish", "args": {"summary": "tamam"}}]
+    d = Daemon(cfg, llm_factory=lambda: ScriptedProvider(list(script)))
+    d.start()
+    try:
+        assert d.agents.wait_online(1, 15)
+        ran = []
+        for _ in range(3):
+            j = d.jobs.wait(d.jobs.submit("explore_rotation", {"goals": str(goals)}), 60)
+            assert j["status"] == "done", j
+            ran.append(j["result"]["goal"])
+        assert ran == ["g1", "g2", "g1"]
+        import training.cycle as cyc
+        monkeypatch.setattr(cyc, "ROOT", tmp_path)                 # veri tmp'ye yazılsın
+        j = d.jobs.wait(d.jobs.submit("learning_cycle", {"min_samples": 10_000}), 60)
+        assert j["status"] == "done" and j["result"]["status"] == "collecting", j
+        assert j["result"]["dataset"]["samples"] >= 1
+    finally:
+        d.shutdown()
+
+
+def test_headless_refuses_to_walk_off_the_map(server, prof):
+    b = _login(server, prof)
+    with pytest.raises(ActionError, match="OUT_OF_MAP"):
+        b.call("move_to", x=5000, y=-100)        # harita 0..25600; y < 0 dışarıda
+    b.call("move_to", x=5200, y=5000)            # içeride: kabul
+    b.close()

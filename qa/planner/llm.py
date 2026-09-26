@@ -268,7 +268,7 @@ class OllamaProvider:
 
     def __init__(self, model: str, base_url: str = OLLAMA_URL, temperature: float = 0.4, timeout_s: float = 300.0,
                  num_ctx: int = 8192, max_retries: int = 2, opener: Callable[..., Any] | None = None,
-                 sleep: Callable[[float], None] | None = None, **_ignored: Any):
+                 sleep: Callable[[float], None] | None = None, think: bool | None = None, **_ignored: Any):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
@@ -277,6 +277,8 @@ class OllamaProvider:
         self.max_retries = max_retries
         self._open = opener or urllib.request.urlopen
         self._sleep_fn = sleep
+        # Düşünen modeller (qwen3, deepseek-r1): False = her adımda uzun akıl yürütme üretme (çok daha hızlı)
+        self.think = think
 
     @staticmethod
     def _messages(system: str, messages: list[Message]) -> list[dict[str, Any]]:
@@ -326,6 +328,8 @@ class OllamaProvider:
             "stream": False,
             "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
         }
+        if self.think is not None:
+            body["think"] = self.think
         data = self._post(body)
         msg = data.get("message") or {}
         text = msg.get("content") or ""

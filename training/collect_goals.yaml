@@ -1,0 +1,66 @@
+# Veri toplama hedefleri: 7/24 servisin `explore_rotation` işi bunları sırayla yerel modelle (Ollama)
+# koşar; kayıtlar training/export_dataset.py ile eğitim verisine dönüşür. Değerlendirme setinden
+# (eval_goals.yaml) farklı tutun ki model sınava ezber yapmasın.
+goals:
+  - id: village_tour
+    goal: >
+      Başlangıç köyünü dolaş. Farklı yönlere yürü, gördüğün NPC'leri ve canavarları observe ile not et.
+      Sıkışırsan başka yöne dön. Bitince finish ile ne gördüğünü özetle.
+    steps: 15
+
+  - id: quest_chain_start
+    goal: >
+      Görevlerine bak. Alınabilir (available) bir görev varsa veren NPC'ye git, görevi kabul et ve görevin
+      işaret ettiği NPC'ye git (go_to_quest_npc). Görev metinleri bozuk ya da işaret yanlışsa bildir.
+    steps: 20
+    setup:
+      - quest_reset: mr2_s1_1
+
+  - id: quest_turn_in
+    goal: >
+      Etkin bir görevin varsa hedeflerini tamamlamaya çalış ve teslim et. Ödülün envantere girdiğini
+      kontrol et. Görev yoksa köydeki NPC'lerle konuşarak görev ara.
+    steps: 25
+
+  - id: combat_basic
+    goal: >
+      Köyün dışındaki en yakın canavarları kes. HP düşünce kırmızı iksir (27001) kullan. Düşen eşyaları
+      topla ve envanterde olduklarını doğrula.
+    steps: 25
+    setup:
+      - give_item: {vnum: 27001, count: 30}
+
+  - id: potion_rules
+    goal: >
+      Envanterdeki iksirleri farklı HP seviyelerinde kullan. HP'nin max_hp'yi aşmadığını ve iksir sayısının
+      doğru azaldığını check ile doğrula.
+    steps: 15
+    setup:
+      - give_item: {vnum: 27001, count: 10}
+      - set_hp: 300
+
+  - id: shop_visit
+    goal: >
+      Köydeki satıcı NPC'lerden birini bul, dükkânı aç, ucuz bir eşya al ve sonra sat. Yangın doğru
+      değiştiğini doğrula; yetersiz yang durumunu da dene.
+    steps: 20
+    setup:
+      - set_gold: 5000
+
+  - id: npc_dialogs
+    goal: >
+      Köydeki NPC'lerle tek tek konuş. Menü seçeneklerini dene, pencereleri düzgün kapat. Bozuk metin ya da
+      çalışmayan seçenek görürsen report_finding ile bildir.
+    steps: 20
+
+  - id: equip_cycle
+    goal: >
+      Envanterdeki ekipmanları giy ve çıkar. Giyince statların değiştiğini, çıkarınca geri döndüğünü
+      observe ile karşılaştır.
+    steps: 15
+
+  - id: trade_real_player
+    goal: >
+      Yakında gerçek bir oyuncu (AI_QA_ ile başlamayan) varsa ona trade_with ile ticaret aç, küçük bir
+      eşya koy ve iptal et. Yakında oyuncu yoksa hiçbir şey yapmadan finish çağır.
+    steps: 10

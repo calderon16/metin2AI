@@ -108,6 +108,8 @@ class ExplorerConfig:
     # provider = "ollama": yerel Ollama sunucusu ve bağlam penceresi (token)
     ollama_url: str = "http://127.0.0.1:11434"
     num_ctx: int = 8192
+    # Düşünen modellerde (qwen3…) akıl yürütme: False kapatır (hızlı), None modelin varsayılanı
+    ollama_think: bool | None = None
 
     # --- Bütçe koruması (tüm keşifler için ortak; kullanım SQLite'ta tutulur) ---
     # Ücretsiz katman (Google AI Studio): maliyet $0 sayılır, sınırlayıcı olan günlük istek kotasıdır
