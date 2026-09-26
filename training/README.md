@@ -59,11 +59,17 @@ otomatik çalışabilir. Colab da olur, ama orada adımları elle yaparsınız.
 1. **Hesap:** https://www.kaggle.com → *Register* → Google hesabı ya da e-posta ile kaydolun.
 2. **Telefon doğrulaması (zorunlu):** sağ üstte profil → *Settings* → *Phone Verification*. Doğrulama
    olmadan not defterlerinde GPU ve internet açılmaz.
-3. **API anahtarı:** *Settings* → *API* → **Create New Token**. Tarayıcı `kaggle.json` dosyasını indirir.
-4. **Anahtarı yerleştirin:** dosyayı `C:\Users\<kullanıcı>\.kaggle\kaggle.json` konumuna taşıyın
-   (`.kaggle` klasörü yoksa oluşturun). **Bu dosyayı depoya, e-postaya ya da sohbete koymayın.**
-   Alternatif: `KAGGLE_USERNAME` ve `KAGGLE_KEY` kullanıcı ortam değişkenleri.
-5. **Deneme:** `metin2AI\.venv\Scripts\kaggle.exe datasets list -s metin2` bir liste döndürmeli.
+3. **API anahtarı:** *Settings* → *API Tokens* → **Generate New Token** (ad: `metin2`). Açılan pencerede
+   `KGAT_…` ile başlayan anahtar **bir kez** gösterilir. Anahtarı kimseyle paylaşmayın; sohbete ya da ekran
+   görüntüsüne koymayın.
+4. **Anahtarı kaydedin** (kendi terminalinizde, anahtarı pencereden kopyalayıp yapıştırarak):
+   ```bat
+   setx KAGGLE_API_TOKEN "KGAT_buraya_yapistirin"
+   ```
+   Kullanıcı ortam değişkeni olarak saklanır, depoya girmez. Alternatif: anahtarı tek satır olarak
+   `C:\Users\<kullanıcı>\.kaggle\access_token` dosyasına kaydedin.
+5. **Deneme** (yeni bir terminalde): `metin2AI\.venv\Scripts\kaggle.exe datasets list -s metin2` bir liste
+   döndürmeli. Servisi de Studio'dan yeniden başlatın ki anahtarı görsün.
 6. Hazır. `learning_cycle` işi yeterli veri (150+ örnek) birikince veri kümesini **özel** olarak yükler,
    not defterini GPU'lu **özel** bir not defteri olarak çalıştırır (~20–40 dk), çıkan modeli indirir,
    Ollama'ya ekler, sınav setinde ölçer ve daha iyiyse devreye alır.

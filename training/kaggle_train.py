@@ -1,7 +1,7 @@
 """Kaggle'ın ücretsiz GPU'sunda eğitimi otomatik çalıştır (kaggle CLI ile).
 
-Kimlik bilgisi dosyaya YAZILMAZ; Kaggle'ın standart yerlerinden okunur: KAGGLE_USERNAME + KAGGLE_KEY
-ortam değişkenleri ya da %USERPROFILE%\\.kaggle\\kaggle.json (Kaggle → Settings → API → Create New Token).
+Kimlik bilgisi depoya YAZILMAZ; Kaggle'ın standart yerlerinden okunur: yeni API anahtarı (KAGGLE_API_TOKEN
+ortam değişkeni ya da %USERPROFILE%\\.kaggle\\access_token) veya eski kaggle.json / KAGGLE_USERNAME+KAGGLE_KEY.
 
     python training/kaggle_train.py training/data --out training/incoming
 
@@ -41,6 +41,9 @@ def kaggle_cli() -> list[str]:
 
 
 def credentials_available() -> bool:
+    """Yeni API anahtarı (KAGGLE_API_TOKEN ya da ~/.kaggle/access_token) veya eski kaggle.json."""
+    if os.environ.get("KAGGLE_API_TOKEN") or (Path.home() / ".kaggle" / "access_token").exists():
+        return True
     if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
         return True
     return (Path.home() / ".kaggle" / "kaggle.json").exists()
@@ -52,6 +55,17 @@ def username() -> str:
     p = Path.home() / ".kaggle" / "kaggle.json"
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))["username"]
+    try:
+        # Yeni anahtar: kullanıcı adı anahtarın kendisinden (Kaggle istemcisi doğrular)
+        from kaggle.api.kaggle_api_extended import KaggleApi
+
+        api = KaggleApi()
+        api.authenticate()
+        name = api.config_values.get(api.CONFIG_NAME_USER)
+        if name:
+            return name
+    except Exception as e:  # noqa: BLE001
+        raise KaggleError(f"Kaggle kimliği doğrulanamadı: {e}") from e
     raise KaggleError("Kaggle kimlik bilgisi yok (training/README.md → Kaggle hesabı)")
 
 
