@@ -246,3 +246,40 @@ def test_gemini_over_real_http(service, monkeypatch):
     assert bodies[1][2]["contents"][1]["parts"][0]["functionCall"]["name"] == "qa_setup"
     assert "functionResponse" in bodies[1][2]["contents"][2]["parts"][0]
     assert out["validation"]["result"] == "PASSED"
+
+
+def _quota_error(req, body: dict):
+    import json as _json
+    return urllib.error.HTTPError(req.full_url, 429, "quota", {}, io.BytesIO(_json.dumps(body).encode()))
+
+
+def test_gemini_waits_retry_delay_then_succeeds():
+    waits, calls = [], []
+    ok_body = b'{"candidates":[{"content":{"role":"model","parts":[{"text":"tamam"}]}}]}'
+
+    def opener(req, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _quota_error(req, {"error": {"code": 429, "details": [
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "20.3s"}]}})
+        return io.BytesIO(ok_body)
+
+    p = GeminiProvider("m", api_key="k", opener=opener, sleep=waits.append)
+    p.chat("s", [Message("user", "x")], [])
+    assert len(calls) == 2 and 21 <= waits[0] <= 22        # sunucunun istediği kadar bekler
+
+
+def test_gemini_daily_quota_fails_fast():
+    calls = []
+
+    def opener(req, timeout):
+        calls.append(1)
+        raise _quota_error(req, {"error": {"code": 429, "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+             "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}})
+
+    p = GeminiProvider("m", api_key="k", opener=opener, sleep=lambda s: None)
+    with pytest.raises(LLMError, match="günlük kota"):
+        p.chat("s", [Message("user", "x")], [])
+    assert len(calls) == 1                                  # günlük kotada boşuna beklemez
+
