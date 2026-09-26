@@ -10,6 +10,12 @@ from qa.store.db import Store
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _no_real_map_directory(monkeypatch, tmp_path_factory):
+    """Testler gerçek sunucunun harita rehberini (maps/npc_directory.json) okumasın; simülatör dünyası farklı."""
+    monkeypatch.setenv("QA_NPC_DIRECTORY", str(tmp_path_factory.getbasetemp() / "yok_npc_directory.json"))
+
+
 @pytest.fixture
 def cfg(tmp_path: Path) -> QaConfig:
     c = QaConfig(root=ROOT, artifacts_dir=tmp_path / "artifacts", db_path=tmp_path / "qa.sqlite")

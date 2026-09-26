@@ -87,6 +87,17 @@ class Daemon:
                     self.jobs.cancel(j["job_id"])
         return self.player_info()
 
+    def _paused_accounts(self) -> set[str]:
+        import json
+        from pathlib import Path
+
+        try:
+            mem = json.loads((Path(self.cfg.resolve("artifacts")) / "daemon" / "player_memory.json")
+                             .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        return {acc for acc, e in mem.items() if isinstance(e, dict) and e.get("paused")}
+
     def owner_command_pending(self, account: str) -> bool:
         return any(j["type"] == "owner_command" and (j.get("params") or {}).get("account") == account
                    for j in self.db.list_jobs("queued", 200))
@@ -101,6 +112,7 @@ class Daemon:
             return []          # önce sıradaki işler (komutlar, testler) ajan alsın
         playing = {(j.get("params") or {}).get("account") for j in jobs
                    if j["type"] in ("play_session", "owner_command")}
+        playing |= self._paused_accounts()
         wanted = set(dc.player_accounts)
         created = []
         for a in self.agents.list():

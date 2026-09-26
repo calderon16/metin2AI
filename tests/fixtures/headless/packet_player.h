@@ -3,6 +3,7 @@
 enum
 {
 	HEADER_CG_ITEM_DROP2 = 20,
+	HEADER_CG_ITEM_MOVE = 13,
 	HEADER_CG_USE_SKILL = 52,
 	HEADER_CG_ITEM_USE_TO_ITEM = 60,
 	HEADER_CG_SHOP = 70,
@@ -109,6 +110,14 @@ typedef struct packet_skill_level_new
 	BYTE			bHeader;
 	TPlayerSkill	skills[255];
 } TPacketGCSkillLevelNew;
+
+typedef struct command_item_move
+{
+	BYTE		header;
+	TItemPos	pos;
+	TItemPos	change_pos;
+	BYTE		num;
+} TPacketCGItemMove;
 
 typedef struct command_item_drop2
 {

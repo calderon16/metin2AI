@@ -1,4 +1,5 @@
-"""Harita NPC rehberi: oyuncunun uzaktan göremediği NPC'lerin (satıcı, demirci ...) ad ve konumları.
+"""Harita rehberi: oyuncunun uzaktan göremediği NPC'lerin (satıcı, demirci ...) ve canavar doğma yerlerinin
+konumları, ayrıca eşya adları (model 27001'i "silah" sanmasın).
 
 Gerçek oyuncu köyü bilir ya da haritaya bakar; model ise yalnız yakınındaki varlıkları görür. Rehber, sunucunun
 harita dosyalarından (map/<ad>/npc.txt + Setting.txt BasePosition) çıkarılmış `world.json`'dan üretilir:
@@ -21,17 +22,101 @@ DEFAULT_PATH = Path(__file__).resolve().parents[2] / "maps" / "npc_directory.jso
 _cache: dict[str, Any] = {}
 
 
-def build(world_json: Path, out: Path) -> dict[str, int]:
-    world = json.loads(Path(world_json).read_text(encoding="utf-8"))
+def _hex_names(path: Path) -> dict[int, str]:
+    """mob_names.tsv / item_names.tsv: vnum \t yerel_ad_hex \t ad_hex(cp1254) ..."""
+    out: dict[int, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="ascii", errors="replace").splitlines():
+        p = line.split("\t")
+        if len(p) < 3 or not p[0].strip().isdigit():
+            continue
+        try:
+            name = bytes.fromhex(p[2]).decode("cp1254").strip()
+        except ValueError:
+            continue
+        if name:
+            out[int(p[0])] = name
+    return out
+
+
+def _groups(path: Path) -> dict[int, list[int]]:
+    """group.txt / group_group.txt blokları: Vnum -> üye vnum'ları (group_group'ta üyeler grup vnum'larıdır)."""
+    out: dict[int, list[int]] = {}
+    if not path.exists():
+        return out
+    vnum: int | None = None
+    members: list[int] = []
+    for raw in path.read_text(encoding="cp1254", errors="replace").splitlines():
+        p = [x for x in raw.strip().split("\t") if x != ""]
+        if not p:
+            continue
+        if p[0] == "Group":
+            vnum, members = None, []
+        elif p[0] == "Vnum" and len(p) > 1 and p[1].isdigit():
+            vnum = int(p[1])
+        elif p[0] == "Leader" and p[-1].isdigit():
+            members.append(int(p[-1]))
+        elif p[0].isdigit() and len(p) >= 2:
+            # group.txt: "1  Ad  vnum" ; group_group.txt: "1  grup_vnum  ağırlık"
+            nums = [int(x) for x in p[1:] if x.isdigit()]
+            if nums:
+                members.append(nums[-1] if len(p) >= 3 and not p[1].isdigit() else nums[0])
+        elif p[0] == "}" and vnum is not None:
+            out[vnum] = sorted(set(members))
+    return out
+
+
+def _mob_spots(qdir: Path, map_name: str, base: list[int], groups: dict[int, list[int]],
+               group_groups: dict[int, list[int]], max_spots: int = 40) -> dict[int, list[list[int]]]:
+    path = qdir / "map" / map_name / "regen.txt"
+    spots: dict[int, list[list[int]]] = {}
+    if not path.exists():
+        return spots
+    for raw in path.read_text(encoding="cp1254", errors="replace").splitlines():
+        p = raw.strip().split("\t")
+        if len(p) < 11 or p[0] not in ("m", "g", "r") or not p[10].strip().isdigit():
+            continue
+        try:
+            x, y = base[0] + int(p[1]) * 100, base[1] + int(p[2]) * 100
+        except ValueError:
+            continue
+        v = int(p[10])
+        if p[0] == "m":
+            mobs = [v]
+        elif p[0] == "g":
+            mobs = groups.get(v, [])
+        else:
+            mobs = sorted({m for g in group_groups.get(v, []) for m in groups.get(g, [])})
+        for mob in mobs:
+            lst = spots.setdefault(mob, [])
+            # birbirine çok yakın doğma noktalarını tekrar yazma (≈20 m)
+            if len(lst) < max_spots and all(abs(a - x) + abs(b - y) > 2000 for a, b in lst):
+                lst.append([x, y])
+    return spots
+
+
+def build(world_json: Path, out: Path, qresearch: Path | None = None) -> dict[str, int]:
+    world_json = Path(world_json)
+    world = json.loads(world_json.read_text(encoding="utf-8"))
+    qdir = Path(qresearch) if qresearch else world_json.parent / "qresearch"
+    mob_names = _hex_names(qdir / "mob_names.tsv")
+    groups, group_groups = _groups(qdir / "group.txt"), _groups(qdir / "group_group.txt")
     maps: dict[str, Any] = {}
     for m in world:
         npcs = [{"vnum": int(n["vnum"]), "name": n.get("name") or str(n["vnum"]), "x": int(n["x"]), "y": int(n["y"])}
                 for n in m.get("npcs") or []]
-        if npcs:
-            maps[str(m["index"])] = {"name": m.get("name"), "npcs": npcs}
+        levels = {int(x["vnum"]): x.get("level") for x in m.get("mobs") or []}
+        spots = _mob_spots(qdir, m["name"], m.get("base") or [0, 0], groups, group_groups)
+        mobs = [{"vnum": v, "name": mob_names.get(v, str(v)), "level": levels.get(v), "spots": s}
+                for v, s in sorted(spots.items())]
+        if npcs or mobs:
+            maps[str(m["index"])] = {"name": m.get("name"), "npcs": npcs, "mobs": mobs}
+    items = {str(k): v for k, v in _hex_names(qdir / "item_names.tsv").items()}
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"maps": maps}, ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"maps": len(maps), "npcs": sum(len(v["npcs"]) for v in maps.values())}
+    out.write_text(json.dumps({"maps": maps, "items": items}, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"maps": len(maps), "npcs": sum(len(v["npcs"]) for v in maps.values()),
+            "mob_kinds": sum(len(v["mobs"]) for v in maps.values()), "items": len(items)}
 
 
 def path() -> Path:
@@ -63,6 +148,29 @@ def npcs_on_map(map_index: int | None) -> list[dict[str, Any]]:
     if not d or map_index is None:
         return []
     return list((d["maps"].get(str(map_index)) or {}).get("npcs") or [])
+
+
+def item_name(vnum: Any) -> str:
+    d = load()
+    return str(((d or {}).get("items") or {}).get(str(vnum)) or vnum)
+
+
+def mobs_on_map(map_index: int | None) -> list[dict[str, Any]]:
+    d = load()
+    if not d or map_index is None:
+        return []
+    return list((d["maps"].get(str(map_index)) or {}).get("mobs") or [])
+
+
+def find_mob(map_index: int | None, name: str | None = None, vnum: int | None = None) -> list[dict[str, Any]]:
+    rows = mobs_on_map(map_index)
+    if vnum is not None:
+        return [r for r in rows if r["vnum"] == int(vnum)]
+    q = fold(name or "")
+    if not q:
+        return []
+    exact = [r for r in rows if fold(r["name"]) == q]
+    return exact or [r for r in rows if q in fold(r["name"])]
 
 
 def find(map_index: int | None, name: str | None = None, vnum: int | None = None) -> list[dict[str, Any]]:

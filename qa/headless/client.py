@@ -716,10 +716,12 @@ class HeadlessClient:
     def cmd_get_inventory(self) -> dict[str, Any]:
         self._need_game()
         size = self.b["inventory_size"]
-        items = [{"slot": c, "vnum": v["vnum"], "count": v["count"], "name": str(v["vnum"])}
+        from ..engine.npcdir import item_name
+
+        items = [{"slot": c, "vnum": v["vnum"], "count": v["count"], "name": item_name(v["vnum"])}
                  for c, v in sorted(self.items.items()) if c < size]
         wear = self.b["wear_names"]
-        eq = {wear.get(c - size, f"wear{c - size}"): {"vnum": v["vnum"], "name": str(v["vnum"])}
+        eq = {wear.get(c - size, f"wear{c - size}"): {"vnum": v["vnum"], "name": item_name(v["vnum"])}
               for c, v in self.items.items() if c >= size}
         return {"size": size, "items": items, "equipment": eq}
 
@@ -757,8 +759,10 @@ class HeadlessClient:
     def cmd_get_open_windows(self) -> list[dict[str, Any]]:
         out = [{"name": "dialog", "text": self.dialog["text"], "options": self.dialog["options"]}] if self.dialog else []
         if self.shop is not None:
+            from ..engine.npcdir import item_name
+
             out.append({"name": "shop", "npc_vid": self.shop["npc_vid"],
-                        "items": [{**i, "name": str(i["vnum"])} for i in self.shop["items"]]})
+                        "items": [{**i, "name": item_name(i["vnum"])} for i in self.shop["items"]]})
         if self.refine_window is not None:
             out.append({"name": "refine", **self.refine_window})
         if self.trade is not None:
@@ -914,6 +918,9 @@ class HeadlessClient:
                 raise HeadlessError("OUT_OF_MAP", f"Hedef harita dışında: harita {m['index']} sınırları "
                                     f"X {int(x0)}..{int(x1)}, Y {int(y0)}..{int(y1)}")
         route = self._plan_route(float(x), float(y), m)
+        npc = self.chars.get(self.shop["npc_vid"]) if self.shop is not None else None
+        if self.shop is not None and (npc is None or _dist(float(x), float(y), npc["x"], npc["y"]) > 1000):
+            self._close_shop()      # gerçek istemci satıcıdan uzaklaşınca dükkânı kapatır
         self.dest, self.route = route[0], route[1:]
         self.attacking = False
         self._next_move = 0.0
@@ -977,6 +984,10 @@ class HeadlessClient:
             # başka NPC'lerdeki seçeneklerini menüye koymaz.
             self.log("açık diyalog kapatıldı (yeni NPC'ye tıklamadan önce)")
             self._close_dialog()
+        if self.shop is not None:
+            # Gerçek istemci başka NPC'ye tıklayınca/uzaklaşınca dükkânı kapatır (SendShopEndPacket); açık dükkân
+            # varken sunucu yeni dükkân açmaz
+            self._close_shop()
         self._last_click = int(vid)
         self._send("on_click", vid=int(vid))
         self._pump(300)
@@ -1037,7 +1048,10 @@ class HeadlessClient:
         if self._shop_result in self.SHOP_ERRORS:
             raise HeadlessError(*self.SHOP_ERRORS[self._shop_result])
         gold = self._point("GOLD", 0) or 0
-        return {"vnum": it["vnum"], "price": it["price"], "gold": gold, "confirmed": gold != gold0}
+        if gold == gold0:
+            # Sunucu ne hata ne yang değişimi gönderdi: alım olmadı (ör. dükkân kapanmış) — başarı sayma
+            raise HeadlessError("BUY_FAILED", "Satın alma gerçekleşmedi (yang değişmedi); dükkânı yeniden aç")
+        return {"vnum": it["vnum"], "price": it["price"], "gold": gold, "confirmed": True}
 
     def cmd_sell_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
         self._need_alive()
@@ -1156,6 +1170,24 @@ class HeadlessClient:
         slot = next((c for c, v in sorted(self.items.items()) if v["vnum"] == vnum and c < self.b["inventory_size"]),
                     None)
         return {"slot": slot}
+
+    def cmd_split_item(self, slot: int, count: int) -> dict[str, Any]:
+        """Yığını böl: count kadarını ilk boş envanter hücresine taşı (istemcide Shift+sürükle, CG_ITEM_MOVE)."""
+        self._need_alive()
+        slot, count = int(slot), int(count)
+        pos = self._item_pos(slot)
+        have = int(self.items[slot].get("count") or 1)
+        if not 0 < count < have:
+            raise HeadlessError("BAD_COUNT", f"Bölmek için 1..{have - 1} arası adet gerekli (yığında {have} var)")
+        size = self.b["inventory_size"]
+        free = next((c for c in range(size) if c not in self.items), None)
+        if free is None:
+            raise HeadlessError("INVENTORY_FULL", "Envanterde boş yer yok")
+        vnum = self.items[slot]["vnum"]
+        self._send("item_move", pos=pos, to={"window_type": self.b["inventory_window"], "cell": free}, count=count)
+        if not self._pump_for(lambda: self.items.get(free, {}).get("vnum") == vnum, 2.0):
+            raise HeadlessError("SPLIT_FAILED", "Yığın bölünemedi")
+        return {"slot": free, "count": self.items[free]["count"]}
 
     def cmd_drop_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
         self._need_alive()

@@ -72,6 +72,7 @@ Kurallar:
 - Her şeyi gerçek bir oyuncu gibi yap. Bir yere gitmek için YÜRÜ (walk_to, go_to_npc, go_to_quest_npc,
   talk_npc). Uzaktaki bir NPC'ye (Silah Satıcısı, Demirci ...) adıyla go_to_npc ile git. Işınlanma, Işınlayıcı
   NPC, /qa komutu ya da hile yok; bunlar zaten engellidir.
+- Bir oyuncunun yanına go_to_player ile git; go_to_npc yalnız NPC'ler içindir.
 - NPC ile konuşunca adım sonucundaki windows.dialog.options listesini oku ve select_dialog(index=N) ile seç;
   listede olmayan bir seçenek uydurma. Aynı çağrıyı tekrarlayıp duruyorsan başka bir şey dene.
 - Ticaret yalnız GM'lerle (ör. TESTR) yapılabilir; başka oyuncuyla ticaret açma.
@@ -218,12 +219,28 @@ def _messages_view(messages: list[dict[str, Any]], n: int = 5) -> list[str]:
     return [t for t in texts if t.strip() and not _COMMAND_TEXT.match(t.strip())][-n:]
 
 
+def _item_label(i: dict[str, Any]) -> str:
+    """"Kırmızı İksir(K) (27001)" — ad yoksa yalnız vnum."""
+    name = str(i.get("name") or "")
+    return f"{name} ({i['vnum']})" if name and name != str(i["vnum"]) else str(i["vnum"])
+
+
+def _hunting_view(state: dict[str, Any]) -> list[str]:
+    """Bu haritada seviyene yakın canavarlar (rehberden) — "ad (sv N)"; kill_monster(name=...) ile avlanır."""
+    from ..engine import npcdir
+
+    lv = state.get("level") or 1
+    mobs = [m for m in npcdir.mobs_on_map(state.get("map")) if m.get("level") and abs(m["level"] - lv) <= 6]
+    return [f"{m['name']} (sv {m['level']})" for m in sorted(mobs, key=lambda m: m["level"])][:10]
+
+
 def _observe_view(o: dict[str, Any]) -> dict[str, Any]:
     inv = o.get("inventory") or {}
     return _prune({
         "state": _mini_state(o.get("state") or {}),
-        "inventory": [f"{i['vnum']}x{i['count']}@{i['slot']}" for i in inv.get("items", [])],
-        "equipment": {k: v["vnum"] for k, v in (inv.get("equipment") or {}).items()},
+        "inventory": [f"{_item_label(i)} x{i['count']} @{i['slot']}" for i in inv.get("items", [])],
+        "equipment": {k: _item_label(v) for k, v in (inv.get("equipment") or {}).items()},
+        "av_yerleri (kill_monster name=...)": _hunting_view(o.get("state") or {}),
         "quests": o.get("quests"),
         "windows": _windows_view(o.get("windows") or {}),
         "nearby[vid,tür,vnum,ad,mesafe]": _entities_view(o.get("nearby") or []),
@@ -301,7 +318,8 @@ class AutoExplorer:
 
     def run(self, goal: str, *, budget: ExploreBudget | None = None, account: str | None = None,
             seed: int | None = None, setup: list[Any] | None = None, save_as_scenario: str | None = None,
-            validate: bool = True, player: bool = False, should_stop: Any = None) -> ExploreOutcome:
+            validate: bool = True, player: bool = False, should_stop: Any = None,
+            exclude_tools: set[str] | None = None) -> ExploreOutcome:
         """player=True: oyuncu modu — /qa reset ve qa_setup yok (karakter olduğu yerden devam eder), oyuncu
         sistem istemi. should_stop(): her turdan önce sorulur; True ise oturum 'preempted' ile biter."""
         b = budget or ExploreBudget()
@@ -320,6 +338,8 @@ class AutoExplorer:
         tools = behaviour_tools(player) + meta_tools()
         if player:
             tools = [t for t in tools if t.name != "qa_setup"]
+        if exclude_tools:
+            tools = [t for t in tools if t.name not in exclude_tools]
         tool_names = {t.name for t in tools}
         if player:
             system = PLAYER_SYSTEM_PROMPT.format(max_steps=b.max_steps, account=start.get("account") or account)
@@ -396,23 +416,29 @@ class AutoExplorer:
                         steps += 1
                     results.append(ToolResult(call.name, _compact(res), call.id))
                 note = ""
-                for call in calls:
+                for call, res in zip(calls, results):
                     if call.name not in META_TOOLS:
-                        recent.append(_call_signature(call))
+                        c = res.content if isinstance(res.content, dict) else {}
+                        outcome = {k: c.get(k) for k in ("status", "error", "result")}
+                        if isinstance(c.get("windows"), dict) and "dialog" in c["windows"]:
+                            outcome["dialog"] = c["windows"]["dialog"].get("text")
+                        recent.append(_call_signature(call) + "=>" + json.dumps(outcome, ensure_ascii=False,
+                                                                                sort_keys=True, default=str))
                 recent = recent[-LOOP_WINDOW:]
                 repeated = sorted({sig for sig in recent if recent.count(sig) >= LOOP_REPEAT})
                 if repeated and not finished:
                     loop_warnings += 1
                     if loop_warnings > LOOP_MAX_WARNINGS:
                         stop_reason = "stuck_loop"
-                        agent_summary = agent_summary or f"Döngüde takıldı: {repeated[0]}"
+                        agent_summary = agent_summary or f"Döngüde takıldı: {repeated[0].split('=>')[0]}"
                         transcript.write(json.dumps({"turn": turns, "text": reply.message.text,
                                                      "calls": [{"name": c.name, "args": c.args} for c in calls],
                                                      "results": [{"name": r.name, "content": r.content} for r in results],
                                                      "note": "stuck_loop", "usage": reply.usage},
                                                     ensure_ascii=False, default=str) + "\n")
                         break
-                    note = (f"DİKKAT: aynı çağrıyı tekrar ediyorsun ({repeated[0]}); işe yaramıyor. Durumu oku "
+                    note = (f"DİKKAT: aynı çağrıyı aynı sonuçla tekrar ediyorsun ({repeated[0].split('=>')[0]}); "
+                            "işe yaramıyor. Durumu oku "
                             "(observe), farklı bir yol dene ya da işi bırakıp finish ile nedenini yaz.")
                     recent.clear()
                 elif steps >= b.max_steps and not finished:

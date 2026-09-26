@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import contextlib
+
 from ..bridge.protocol import ActionError
 from . import npcdir
 from .executor import BehaviourError, GameContext, behaviour
@@ -227,12 +229,65 @@ def _kill_one(ctx: GameContext, vnum: int, deadline: int, auto_potion: bool, pot
                     break
 
 
+def _walk_far(ctx: GameContext, x: float, y: float, near: float, timeout_ms: int) -> dict[str, Any]:
+    """Uzak bir noktaya parça parça yürü (her parça yol bulmayla); near içine girince dur."""
+    s = _alive_state(ctx)
+    start = ctx.now()
+    while _dist(s, x, y) > near:
+        if ctx.now() - start > timeout_ms:
+            raise BehaviourError("TIMEOUT", f"({round(x)},{round(y)}) noktasına ulaşılamadı", position=[s["x"], s["y"]])
+        d = _dist(s, x, y)
+        k = min(1.0, 4000 / d)
+        try:
+            walk_to(ctx, x=round(s["x"] + (x - s["x"]) * k), y=round(s["y"] + (y - s["y"]) * k), tolerance=300,
+                    timeout_ms=60000)
+        except BehaviourError as e:
+            if e.code != "STUCK":
+                raise
+        s = _alive_state(ctx)
+    return s
+
+
+def _go_hunting(ctx: GameContext, vnum: int, search_radius: int, deadline: int) -> bool:
+    """Görünürde bu canavar yoksa rehberdeki en yakın doğma yerlerine (en çok 3) yürü. Bulunduysa True."""
+    s = _alive_state(ctx)
+    rows = npcdir.find_mob(s.get("map"), vnum=vnum)
+    spots = sorted((sp for r in rows for sp in r.get("spots", [])), key=lambda p: _dist(s, p[0], p[1]))
+    for x, y in spots[:3]:
+        if ctx.now() > deadline:
+            return False
+        _walk_far(ctx, x, y, 800, max(1, deadline - ctx.now()))
+        if _find(ctx, "monster", vnum, radius=search_radius) is not None:
+            return True
+    return False
+
+
+def _resolve_mob(ctx: GameContext, vnum: int | None, name: str | None) -> int:
+    if vnum is not None:
+        return int(vnum)
+    if not name:
+        raise BehaviourError("BAD_ARGS", "vnum ya da name gerekli")
+    seen = [e for e in ctx.entities(type="monster", radius=15000) if npcdir.fold(name) in npcdir.fold(e.get("name", ""))]
+    if seen:
+        return seen[0]["vnum"]
+    rows = npcdir.find_mob(ctx.state().get("map"), name=name)
+    if not rows:
+        known = sorted({f"{r['name']} (sv {r.get('level')})" for r in npcdir.mobs_on_map(ctx.state().get("map"))})
+        raise BehaviourError("MOB_NOT_FOUND", f"Bu haritada '{name}' yok. Buradaki canavarlar: " + ", ".join(known[:40]))
+    return rows[0]["vnum"]
+
+
 @behaviour("kill_monster")
-def kill_monster(ctx: GameContext, vnum: int, count: int = 1, timeout_ms: int = 180000,
-                 auto_potion: bool = True, potion_vnum: int = 27001, potion_below_pct: int = 35,
-                 pickup: bool = False, search_radius: int = 15000, use_skill: int | None = None) -> dict[str, Any]:
-    """vnum'lu moblardan `count` tane öldür (bul → yaklaş → hedef al → saldır → gerekirse iksir)."""
+def kill_monster(ctx: GameContext, vnum: int | None = None, count: int = 1, name: str | None = None,
+                 timeout_ms: int = 300000, auto_potion: bool = True, potion_vnum: int = 27001,
+                 potion_below_pct: int = 35, pickup: bool = False, search_radius: int = 15000,
+                 use_skill: int | None = None) -> dict[str, Any]:
+    """Canavar avla: vnum ya da adıyla (ör. "Yabani Köpek") `count` tane öldür. Görünürde yoksa haritadaki
+    doğma yerine yürür (bul → yaklaş → hedef al → saldır → gerekirse iksir)."""
+    vnum = _resolve_mob(ctx, vnum, name)
     deadline = ctx.now() + timeout_ms
+    if _find(ctx, "monster", vnum, radius=search_radius) is None:
+        _go_hunting(ctx, vnum, search_radius, deadline)
     killed = []
     for _ in range(count):
         mob = _kill_one(ctx, vnum, deadline, auto_potion, potion_vnum, potion_below_pct, search_radius, use_skill)
@@ -336,6 +391,14 @@ def unequip_item(ctx: GameContext, wear_slot: str) -> dict[str, Any]:
     return r
 
 
+@behaviour("split_item")
+def split_item(ctx: GameContext, count: int, vnum: int | None = None, slot: int | None = None) -> dict[str, Any]:
+    """Yığından `count` kadarını ayrı bir slota ayır (ör. ticarette yalnız 2 iksir vermek için)."""
+    r = ctx.act("split_item", slot=_resolve_slot(ctx, vnum, slot), count=count)
+    ctx.react()
+    return r
+
+
 @behaviour("drop_item")
 def drop_item(ctx: GameContext, vnum: int | None = None, slot: int | None = None,
               count: int | None = None) -> dict[str, Any]:
@@ -424,12 +487,21 @@ def go_to_npc(ctx: GameContext, name: str | None = None, vnum: int | None = None
         raise BehaviourError("BAD_ARGS", "name ya da vnum gerekli")
     _refuse_teleporter(vnum, name or "")
     s = _alive_state(ctx)
-    seen = [e for e in ctx.entities(type="npc", radius=15000)
-            if (vnum is not None and e["vnum"] == vnum) or (name and npcdir.fold(name) in npcdir.fold(e.get("name", "")))]
+    if name and any(npcdir.fold(p.get("name", "")) == npcdir.fold(name) for p in ctx.entities(type="pc", radius=20000)):
+        raise BehaviourError("IS_PLAYER", f"'{name}' bir oyuncu: go_to_player(name=\"{name}\") ile yanına git, "
+                             "ticaret için trade_with kullan")
+    npcs = ctx.entities(type="npc", radius=15000)
+    q = npcdir.fold(name or "")
+    seen = [e for e in npcs if (vnum is not None and e["vnum"] == vnum) or (q and npcdir.fold(e.get("name", "")) == q)]
+    if not seen and vnum is None and q:
+        seen = [e for e in npcs if q in npcdir.fold(e.get("name", ""))]
     if seen:
         target = {"vnum": seen[0]["vnum"], "name": seen[0].get("name", ""), "x": seen[0]["x"], "y": seen[0]["y"]}
     else:
         rows = npcdir.find(s.get("map"), name, vnum)
+        if not rows and npcdir.find_mob(s.get("map"), name, vnum):
+            raise BehaviourError("IS_MONSTER", f"'{name or vnum}' bir canavar, NPC değil: "
+                                 f"kill_monster(name=\"{name or vnum}\", count=N) ile avla")
         if not rows:
             known = sorted({r["name"] for r in npcdir.npcs_on_map(s.get("map")) if r["vnum"] not in TELEPORTER_VNUMS})
             if not known:
@@ -439,20 +511,7 @@ def go_to_npc(ctx: GameContext, name: str | None = None, vnum: int | None = None
                                  + ", ".join(known[:40]))
         target = min(rows, key=lambda r: _dist(s, r["x"], r["y"]))
     _refuse_teleporter(target["vnum"], target["name"])
-    start = ctx.now()
-    while _dist(s, target["x"], target["y"]) > NPC_NEAR:
-        if ctx.now() - start > timeout_ms:
-            raise BehaviourError("TIMEOUT", f"{target['name']} yanına ulaşılamadı", position=[s["x"], s["y"]])
-        d = _dist(s, target["x"], target["y"])
-        k = min(1.0, 4000 / d)          # uzun yolu parçalara böl (her parça yol bulmayla yürünür)
-        wx = s["x"] + (target["x"] - s["x"]) * k
-        wy = s["y"] + (target["y"] - s["y"]) * k
-        try:
-            walk_to(ctx, x=round(wx), y=round(wy), tolerance=300, timeout_ms=60000)
-        except BehaviourError as e:
-            if e.code != "STUCK":
-                raise
-        s = _alive_state(ctx)
+    s = _walk_far(ctx, target["x"], target["y"], NPC_NEAR, timeout_ms)
     if not talk:
         return {"npc": target["name"], "vnum": target["vnum"], "x": s["x"], "y": s["y"]}
     r = talk_npc(ctx, vnum=target["vnum"])
@@ -511,6 +570,10 @@ def select_dialog(ctx: GameContext, index: int | None = None, text: str | None =
 
 def _ensure_shop(ctx: GameContext, npc_vnum: int | None) -> dict[str, Any]:
     shop = ctx.windows().get("shop")
+    if shop is not None and npc_vnum is not None:
+        owner = next((e for e in ctx.entities(type="npc", radius=15000) if e["vid"] == shop.get("npc_vid")), None)
+        if owner is not None and npc_vnum not in (owner["vnum"], owner["vid"]):
+            shop = None                      # açık dükkân başka satıcının; istenen satıcıya git
     if shop is None and npc_vnum is not None:
         talk_npc(ctx, vnum=npc_vnum)
         shop = ctx.windows().get("shop")
@@ -631,6 +694,45 @@ def _wait_window(ctx: GameContext, name: str, timeout_ms: int) -> dict[str, Any]
         if ctx.now() - start > timeout_ms:
             raise BehaviourError("TIMEOUT", f"'{name}' penceresi açılmadı")
         ctx.wait(200)
+
+
+@behaviour("go_to_player")
+def go_to_player(ctx: GameContext, name: str, range: int = 300, timeout_ms: int = 120000) -> dict[str, Any]:
+    """Bir oyuncunun (ör. sahibin TESTR) yanına yürü. Oyuncu görüş alanında değilse konumunu sorman gerekir."""
+    q = npcdir.fold(name)
+    pcs = [e for e in ctx.entities(type="pc", radius=30000) if npcdir.fold(e.get("name", "")) == q]
+    if not pcs:
+        raise BehaviourError("PLAYER_NOT_VISIBLE", f"'{name}' görünmüyor (uzakta ya da başka haritada); "
+                             "whisper ile nerede olduğunu sor")
+    e = move_to_entity(ctx, vid=pcs[0]["vid"], type="pc", range=range, radius=30000, timeout_ms=timeout_ms)
+    return {"player": name, "vid": e["vid"], "distance": e["distance"]}
+
+
+@behaviour("trade_wait_and_accept")
+def trade_wait_and_accept(ctx: GameContext, timeout_ms: int = 90000) -> dict[str, Any]:
+    """Açık ticarette karşı tarafın teklifini (eşya/yang) koyup onaylamasını bekle, sonra sen de onayla.
+    Karşı taraf bir şey vermek istediğinde bunu kullan. Süre dolarsa ticaret iptal edilir."""
+    _trade_window(ctx)
+    mark = len(ctx.events)
+    start = ctx.now()
+    accepted_once = False
+    while ctx.now() - start < timeout_ms:
+        w = ctx.windows().get("trade")
+        if w is None:
+            done = bool(ctx.events_since(mark, "trade_completed"))
+            return {"completed": done, "cancelled": None if done else "CLOSED_BY_PARTNER"}
+        if w.get("their_accepted") and not w.get("my_accepted"):
+            r = ctx.act("trade_accept")
+            accepted_once = True
+            r = r if isinstance(r, dict) else {}
+            if r.get("completed"):
+                return {"completed": True, "received_gold": w.get("their_gold", 0),
+                        "received_items": w.get("their_items", [])}
+        ctx.wait(500)
+    with contextlib.suppress(ActionError, BehaviourError):
+        ctx.act("trade_cancel")
+    raise BehaviourError("TRADE_TIMEOUT", "Karşı taraf teklifini onaylamadı; ticaret iptal edildi",
+                         accepted=accepted_once)
 
 
 @behaviour("trade_with")

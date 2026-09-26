@@ -926,6 +926,19 @@ class SimClient:
         p.inventory[free[0]] = p.equipment.pop(wear_slot)
         return {"slot": free[0]}
 
+    def cmd_split_item(self, slot: int, count: int) -> dict[str, Any]:
+        p = self._need_free()
+        s = self._slot(p, slot)
+        count = int(count)
+        if not 0 < count < s["count"]:
+            raise SimError("BAD_COUNT", f"Bölmek için 1..{s['count'] - 1} arası adet gerekli")
+        free = [i for i, x in enumerate(p.inventory) if x is None]
+        if not free:
+            raise SimError("INVENTORY_FULL", "Envanter dolu")
+        s["count"] -= count
+        p.inventory[free[0]] = {"vnum": s["vnum"], "count": count}
+        return {"slot": free[0], "count": count}
+
     def cmd_drop_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
         p = self._need_free()
         s = self._slot(p, slot)

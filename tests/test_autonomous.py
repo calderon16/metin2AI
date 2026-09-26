@@ -29,7 +29,7 @@ def test_tool_schemas():
     assert {"kill_monster", "buy_item", "check", "finish", "report_finding", "qa_setup"} <= set(tools)
     assert "trade_with" in tools and "name" in tools["trade_with"].parameters["properties"]   # gerçek oyuncuyla ticaret
     km = tools["kill_monster"].parameters
-    assert km["properties"]["vnum"]["type"] == "integer" and km["required"] == ["vnum"]
+    assert km["properties"]["vnum"]["type"] == "integer" and km["required"] == [] and "name" in km["properties"]
     assert "auto_potion" not in km["properties"]
     assert {"wait_for_event", "screenshot", "party_invite"}.isdisjoint(tools)
     assert all("expect_error" in t.parameters["properties"] for t in behaviour_tools())
@@ -337,3 +337,40 @@ def test_go_to_npc_uses_directory_and_refuses_teleporter(service, tmp_path, monk
     assert r[1]["status"] == "passed" and abs(r[1]["state"]["x"] - 9000) <= 1500
     assert "NPC_NOT_FOUND" in r[2]["error"] and "Uzak Demirci" in r[2]["error"] and "Işınlayıcı" not in r[2]["error"]
     assert "TELEPORT_FORBIDDEN" in r[3]["error"]
+
+
+def test_kill_monster_by_name_walks_to_spawn_and_views_show_names(service, tmp_path, monkeypatch):
+    # Kurt (102) grubu sim'de (11000, 6000) çevresinde; oyuncu (5000, 5000) — 6 km uzakta, görünmüyor
+    d = {"maps": {"1": {"name": "sim", "npcs": [], "mobs": [
+        {"vnum": 102, "name": "Kurt", "level": 3, "spots": [[30000, 30000], [11000, 6000]]}]}},
+         "items": {"27001": "Kırmızı İksir(K)"}}
+    p = tmp_path / "npc.json"
+    p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("QA_NPC_DIRECTORY", str(p))
+    from qa.planner.autonomous import _hunting_view, _observe_view
+
+    o = _observe_view({"state": {"level": 1, "map": 1},
+                       "inventory": {"items": [{"vnum": 27001, "count": 3, "slot": 0, "name": "Kırmızı İksir(K)"}]}})
+    assert o["inventory"] == ["Kırmızı İksir(K) (27001) x3 @0"] and _hunting_view({"level": 1, "map": 1}) == ["Kurt (sv 3)"]
+    script = [{"name": "kill_monster", "args": {"name": "kurt", "count": 1}},
+              {"name": "go_to_npc", "args": {"name": "Kurt"}},
+              {"name": "kill_monster", "args": {"name": "Ejderha"}},
+              {"name": "finish", "args": {"summary": "av"}}]
+    out = AutoExplorer(service.cfg, service.store, ScriptedProvider(script), service.factory).run(
+        "Oyna", seed=1, budget=ExploreBudget(max_steps=10), player=True)
+    r = [t["results"][0]["content"] for t in _transcript(service, out.run_id)[1:4]]
+    assert r[0]["status"] == "passed" and r[0]["result"]["kills"] == 1
+    assert "IS_MONSTER" in r[1]["error"] and "kill_monster" in r[1]["error"]
+    assert "MOB_NOT_FOUND" in r[2]["error"] and "Kurt (sv 3)" in r[2]["error"]
+
+
+def test_loop_guard_ignores_same_call_with_different_outcomes(service):
+    # sim'de NPC'ye art arda konuşup farklı diyalog seçmek döngü sayılmamalı
+    script = [{"name": "talk_npc", "args": {"vnum": 20016}}, {"name": "select_dialog", "args": {"index": 0}},
+              {"name": "talk_npc", "args": {"vnum": 20016}}, {"name": "select_dialog", "args": {"index": 0}},
+              {"name": "talk_npc", "args": {"vnum": 9001}}, {"name": "close_window", "args": {"name": "shop"}},
+              {"name": "finish", "args": {"summary": "ok"}}]
+    out = AutoExplorer(service.cfg, service.store, ScriptedProvider(script), service.factory).run(
+        "Oyna", seed=1, budget=ExploreBudget(max_steps=20), player=True)
+    notes = [t.get("note", "") for t in _transcript(service, out.run_id)[1:]]
+    assert out.stop_reason == "finished" and not any(n.startswith("DİKKAT") for n in notes)

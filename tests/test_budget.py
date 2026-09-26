@@ -121,7 +121,7 @@ def test_compact_views():
     o = _observe_view({"state": {"hp": 10, "gold": 5, "unused": "x"},
                        "inventory": {"items": [{"vnum": 10, "count": 2, "slot": 0}]},
                        "nearby": [{"vid": 1, "type": "mob", "vnum": 101, "name": "Köpek", "distance": 4}]})
-    assert o["inventory"] == ["10x2@0"] and "unused" not in o["state"]
+    assert o["inventory"] == ["10 x2 @0"] and "unused" not in o["state"]
     r = _step_view({"step": 1, "status": "ok", "client_events": [{"event": "damage_dealt", "data": {}}] * 20,
                     "state": {"hp": 9, "secret": "x"}, "windows": {"shop": {}}})
     assert r["counts"]["damage_dealt"] == 20 and r["windows"] == {"shop": {}}

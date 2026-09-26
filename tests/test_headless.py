@@ -328,7 +328,9 @@ def test_daemon_turns_owner_whisper_into_a_job(server, prof, cfg, tmp_path):
         jobs = [j for j in d.db.list_jobs(None, 20) if j["type"] == "owner_command"]
         assert {j["params"]["account"] for j in jobs} == {"AI_QA_001", "AI_QA_002"}
         assert all(j["source"] == "whisper:TESTR" for j in jobs)
-        assert server.world.whispers_to_owner.count("Tamam, hallediyorum.") == 2
+        # önce işin kendisi söylenir, rapor adımların gerçek sonucundan gelir (model sahibine yazamaz)
+        assert server.world.whispers_to_owner.count("Tamam, şunu yapıyorum: biraz yürü") == 2
+        assert server.world.whispers_to_owner.count("Yaptıklarım: yürüdüm.") == 2
     finally:
         d.shutdown()
 
@@ -362,7 +364,7 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
             n["i"] += 1
             first = messages[0].text or ""
             if "fısıltıyla" not in first and "HEDEF" not in first:
-                return '{"reply": "Tamam", "task": null}'      # sohbet adımı: iş yok, yalnız cevap
+                return "Tamam"      # sohbet cevabı (selam gibi kurallarla anlaşılan mesajlarda)
             return [ToolCall("wait", {"ms": 300}, f"p{i}")]
         return Rec(script)
 
@@ -375,7 +377,7 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
                                                       for j in d.db.list_jobs(None, 20)):
             time.sleep(0.2)
         time.sleep(1.5)
-        assert server.owner_whisper("buraya gel") == 1
+        assert server.owner_whisper("selam") == 1
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and "Tamam" not in server.world.whispers_to_owner:
             time.sleep(0.2)
@@ -389,8 +391,15 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
             time.sleep(0.2)
             owner = d.db.get_job(owner["job_id"])
         # sohbet mesajı: cevap verildi, iş (keşif) başlatılmadı
-        assert owner["result"]["reply"] == "Tamam" and owner["result"]["task"] is None
-        assert not owner["result"].get("run_id")
+        assert owner["result"]["reply"] == "Tamam" and owner["result"]["intent"] == "chat"
+        assert not owner["result"].get("task_run_id")
+        # "gel": ajan yola çıkar; sahibi göremiyorsa bunu doğru söyler (yalan "geldim" yok)
+        n = len(server.world.whispers_to_owner)
+        assert server.owner_whisper("buraya gel") == 1
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(server.world.whispers_to_owner) < n + 2:
+            time.sleep(0.2)
+        assert server.world.whispers_to_owner[n:n + 2] == ["Geliyorum.", "Seni göremiyorum; hangi haritada ve neredesin?"], [(j["type"], j["status"], (j["error"] or "")[-600:], j["progress"]) for j in d.db.list_jobs(None, 5) if j["type"] == "owner_command"]
         assert not [c for c in server.world.stats.get("qa_commands", []) if "reset" in c or "warp" in c]
         assert seen and all("qa_setup" not in tools for _, tools in seen)
         assert any("normal bir oyuncusun" in s for s, _ in seen)

@@ -34,6 +34,7 @@ class FakeWorld:
         self.password = password
         self.lock = threading.Lock()
         self.whispers_to_owner: list[str] = []
+        self.owner_offer_gold = 0     # >0: TESTR, ajanın açtığı ticarete bu kadar yang koyup onaylar
         self.handlers: list[Any] = []
         self.stats = {"moves": 0, "speed_violations": 0, "attacks": 0, "pongs": 0, "logins": 0,
                       "key_agreements": 0, "seq_packets": 0, "seq_errors": 0}
@@ -230,6 +231,14 @@ class _Handler(socketserver.BaseRequestHandler):
         elif name == "HEADER_CG_USE_SKILL":
             with self.w.lock:
                 self.w.stats.setdefault("skills_used", []).append((d["dwVnum"], d["dwTargetVID"]))
+        elif name == "HEADER_CG_ITEM_MOVE":
+            src, dst, n = d["pos"]["cell"], d["change_pos"]["cell"], d["num"]
+            vnum, have = self.me["items"].get(src, [0, 0])
+            if vnum and 0 < n < have and dst not in self.me["items"]:
+                self.me["items"][src] = [vnum, have - n]
+                self.me["items"][dst] = [vnum, n]
+                self.item(src, vnum, have - n)
+                self.item(dst, vnum, n)
         elif name == "HEADER_CG_ITEM_DROP2":
             cell = d["pos"]["cell"]
             vnum, count = self.me["items"].get(cell, [0, 0])
@@ -318,8 +327,14 @@ def _handler_extras() -> None:
         ex = lambda s, me, a1=0, a2=None, a3=0: self.send(  # noqa: E731
             "HEADER_GC_EXCHANGE", subheader=s, is_me=me, arg1=a1, arg2=a2 or pos, arg3=a3)
         if sub == 0 and d["arg1"] == PC_VID:
-            self.trade = {"items": {}, "gold": 0}
+            self.trade = {"items": {}, "gold": 0, "their_gold": 0}
             ex(0, 1, PC_VID)
+            offer = self.w.owner_offer_gold
+            if offer:
+                # TESTR (sahip) yang koyup önce kendisi onaylar; ajan onaylayınca takas olur
+                self.trade["their_gold"] = offer
+                ex(3, 0, offer)
+                ex(4, 0, 1)
         elif not getattr(self, "trade", None):
             return
         elif sub == 1:
@@ -337,7 +352,7 @@ def _handler_extras() -> None:
             for cell in self.trade["items"].values():
                 self.me["items"].pop(cell, None)
                 self.item(cell, 0, 0)
-            self.me["gold"] -= self.trade["gold"]
+            self.me["gold"] += self.trade.get("their_gold", 0) - self.trade["gold"]
             self.point(11, self.me["gold"])
             with self.w.lock:
                 self.w.stats["trades"] = self.w.stats.get("trades", 0) + 1

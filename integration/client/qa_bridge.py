@@ -615,6 +615,23 @@ def cmd_unequip_item(a):
 	return {}
 
 
+def cmd_split_item(a):
+	_need_game()
+	slot, count = int(a["slot"]), int(a["count"])
+	have = player.GetItemCount(slot)
+	if not 0 < count < have:
+		raise QaError("BAD_COUNT", "Bolmek icin 1..%d arasi adet gerekli" % (have - 1))
+	free = None
+	for i in xrange(EQUIPMENT_SLOT_START):
+		if not player.GetItemIndex(i):
+			free = i
+			break
+	if free is None:
+		raise QaError("INVENTORY_FULL", "Envanterde bos yer yok")
+	net.SendItemMovePacket(slot, free, count)   # istemcide Shift+surukle
+	return {"slot": free, "count": count}
+
+
 def cmd_drop_item(a):
 	_need_game()
 	slot = int(a["slot"])

@@ -4,6 +4,7 @@ Referans vektörler sunucunun kendi Crypto++ kitaplığıyla üretildi (tests/da
 CTR anahtar akışı ve her algoritmayı iki yönde de kapsayan tam DH2 anlaşmaları.
 """
 
+import time
 from pathlib import Path
 
 import pytest
@@ -256,4 +257,63 @@ def test_headless_trades_only_with_allowed_partners(improved_prof):
         assert server.world.stats.get("trades", 0) == 0
         b.close()
     finally:
+        server.shutdown()
+
+
+def _owner_daemon(prof, server, cfg, tmp_path):
+    from qa.daemon.core import Daemon
+    from qa.planner.llm import ScriptedProvider
+
+    ppath = tmp_path / "fx.json"
+    prof.save(ppath)
+    cfg.bridge.mode = "headless"
+    cfg.headless = _cfg(server, crypto="improved", profile=str(ppath), trade_partners=["TESTR"],
+                        maps=[{"index": 1, "x": 0, "y": 0, "width": 25600, "height": 25600}])
+    cfg.daemon.agents = [{"account": "AI_QA_001"}]
+    cfg.daemon.owners = ["TESTR"]
+    cfg.daemon.snapshot_interval_s = 0.2
+    return Daemon(cfg, llm_factory=lambda: ScriptedProvider(lambda m: "Selam!"))
+
+
+def _wait_whispers(server, n, timeout=40):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and len(server.world.whispers_to_owner) < n:
+        time.sleep(0.2)
+    return list(server.world.whispers_to_owner)
+
+
+def test_owner_trade_both_directions_reports_only_what_happened(improved_prof, cfg, tmp_path, monkeypatch):
+    """"Bana ticaret at, sana yang vereyim": ajan TESTR'e gidip ticaret açar, onun teklifini bekleyip onaylar.
+    "Bana iksirlerini ver": ajan iksirleri koyup onaylar. Raporlar gerçekten olanı söyler."""
+    d_items = tmp_path / "npc.json"
+    d_items.write_text('{"maps": {}, "items": {"27001": "Kırmızı İksir(K)"}}', encoding="utf-8")
+    monkeypatch.setenv("QA_NPC_DIRECTORY", str(d_items))
+    server = FakeMetin2(improved_prof, improved=True)
+    server.world.owner_offer_gold = 500
+    d = _owner_daemon(improved_prof, server, cfg, tmp_path)
+    d.start()
+    try:
+        assert d.agents.wait_online(1, 15)
+        server.owner_whisper("bana ticaret at sana yang vereyim")
+        got = _wait_whispers(server, 3)
+        assert got == ["Geliyorum, sana ticaret açacağım.", "Ticaret penceresini açtım; teklifini koyup onayla.",
+                       "Aldım, teşekkürler! (+500 yang)"]
+        server.world.owner_offer_gold = 0
+        server.owner_whisper("bana kırmızı iksirlerini ver")
+        got = _wait_whispers(server, 5)
+        assert got[3:] == ["Geliyorum, ticarete koyacağım.", "Verdim."]
+        server.owner_whisper("bana 100000 yang ver")
+        got = _wait_whispers(server, 6)
+        assert got[5] == "Yeterli yangım yok (şu an 500 yang var)."
+        server.owner_whisper("bana ejderha kılıcı ver")
+        got = _wait_whispers(server, 7)
+        assert got[6] == "İstediğin eşya envanterimde yok; envanterim boş."    # iksirleri az önce verdi
+        server.owner_whisper("neredesin")
+        got = _wait_whispers(server, 8)
+        assert got[7].startswith("Seviye 10, 500 yang, HP ") and "(5000, 5000)" in got[7], got[7]
+        server.owner_whisper("envanterinde ne var")      # model "status" der; cevap gerçek envanterden
+        got = _wait_whispers(server, 9)
+        assert got[8] == "Envanterim boş."
+    finally:
+        d.shutdown()
         server.shutdown()

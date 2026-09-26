@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from ..planner.autonomous import AutoExplorer, ExploreBudget
 from ..planner.budget import BudgetedProvider
+from ..engine import npcdir
 from ..planner.llm import Message
 from ..replay import replay_run
 from ..scenario.loader import load_scenario
@@ -102,7 +103,7 @@ class JobContext:
     def explore(self, goal: str, max_steps: int | None = None, save_as: str | None = None,
                 setup: list[Any] | None = None, seed: int | None = None, system: str | None = None,
                 provider: Any = None, account: str | None = None, player: bool = False,
-                should_stop: Any = None) -> dict[str, Any]:
+                should_stop: Any = None, exclude_tools: set[str] | None = None) -> dict[str, Any]:
         """player=True: oyuncu modu (reset/qa_setup/ışınlanma yok). should_stop(ajan) her turdan önce sorulur."""
         d = self.daemon
         provider = provider or d.make_llm_provider()
@@ -113,7 +114,8 @@ class JobContext:
             stop = (lambda: bool(self.cancelled() or should_stop(agents[0]))) if should_stop else self.cancelled
             out = AutoExplorer(d.cfg, d.store, provider, factory).run(
                 goal, budget=budget, account=agents[0].account, seed=seed, setup=setup,
-                save_as_scenario=save_as, validate=False, player=player, should_stop=stop).to_dict()
+                save_as_scenario=save_as, validate=False, player=player, should_stop=stop,
+                exclude_tools=exclude_tools).to_dict()
             self._record(out["run_id"], agents)
             from ..scenario.runner import load_run_report
 
@@ -209,50 +211,20 @@ def _explore_rotation(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
     return {"goal": g["id"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
 
 
-OWNER_CHAT_SYSTEM = """Sen Metin2'de {account} adlı karakteri oynayan gerçek bir oyuncu gibisin. {sender} senin
-sahibin (GM); sana oyunda fısıltıyla yazıyor. Onunla doğal, samimi ve kısa (en çok 2 cümle) Türkçe konuş.
-Oyundaki durumun (bunu bilerek cevap ver): {state}
-Şu an yaptığın: {activity}
-Son planın: {plan}
-
-Mesajı oku ve karar ver:
-- Sohbet, selam ya da soruysa (selam, nasılsın, neredesin, seviyen kaç, ne yapıyorsun): durumuna göre cevap ver,
-  task null olsun. Selama "Tamam, hallediyorum" deme; selamla karşılık ver.
-- Oyunda yapılacak bir iş istiyorsa (git, gel, al, sat, kes, topla, giy, + bas, görev yap ...): kısa bir cevap
-  ver ve task alanına işi oyunda yapılacak açık bir cümleyle yaz.
-- {sender} bir GM'dir: onunla ticaret yapabilirsin. "Bana X ver" derse X'i SEN ona verirsin: task'a
-  "{sender}'e ticaretle X ver" yaz. Başka oyuncularla ticaret yok.
-- Işınlanmazsın: ışınlanmanı ya da Işınlayıcı'yı kullanmanı isterse yürüyerek gideceğini söyle ve task'a işin
-  yürüyerek yapılacak hâlini yaz. Hile ve /qa komutu yok.
-YALNIZCA şu JSON'u yaz, başka bir şey yazma: {{"reply": "...", "task": null}}"""
-
-OWNER_TASK_GOAL = """Sahibin {sender} fısıltıyla şunu yazdı: «{text}»
-Ona zaten cevap verdin ("{reply}"). Şimdi şu işi normal oyuncu eylemleriyle yap: {task}
+OWNER_TASK_GOAL = """Sahibin {sender} fısıltıyla şunu istedi: «{text}»
+Yapılacak iş: {task}
 - Uzaktaki bir NPC'ye (Silah Satıcısı, Demirci ...) go_to_npc ile adıyla git; açılan diyalogda
   windows.dialog.options listesinden index ile seç.
-- Bitince ya da yapamazsan whisper ile {sender}'e sonucu kısa ve doğal bir cümleyle bildir, sonra finish çağır."""
+- Bir oyuncunun ({sender}) yanına go_to_player ile git. Ticaret: trade_with(name="{sender}").
+- Sahibine sen yazma; sonuç raporu yaptığın adımlardan otomatik gider. Bitince ya da yapamazsan finish çağır ve
+  özetinde neyi yapıp neyi yapamadığını dürüstçe yaz."""
+
+CHAT_REPLY_SYSTEM = """Sen Metin2'de {account} adlı karakteri oynuyorsun; {sender} (GM) sana fısıltıyla yazdı.
+Ona kısa (tek cümle), samimi ve doğal bir Türkçe cevap ver. Bu yalnız sohbet: bir iş yaptığını ya da
+yapacağını SÖYLEME, sayı ya da bilgi uydurma. Durumun: {state}. Yalnız cevap cümlesini yaz."""
 
 _MEMORY_LOCK = threading.Lock()
 CHAT_HISTORY = 8
-
-
-def _parse_chat(text: str) -> tuple[str, str | None]:
-    """Modelin {"reply", "task"} yanıtı; JSON bozuksa metnin kendisi cevap sayılır (iş yok)."""
-    t = (text or "").strip()
-    if "</think>" in t:
-        t = t.rsplit("</think>", 1)[1].strip()
-    start, end = t.find("{"), t.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            obj = json.loads(t[start:end + 1])
-            reply = str(obj.get("reply") or "").strip()
-            task = obj.get("task")
-            task = str(task).strip() if task not in (None, "", "null", "None") else None
-            if reply or task:
-                return reply or "Tamam.", task
-        except ValueError:
-            pass
-    return (t.strip("` \n")[:200] or "Hmm?"), None
 
 
 def _update_memory(ctx: "JobContext", acc: str, fn: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -276,44 +248,201 @@ def _read_memory(ctx: "JobContext", acc: str) -> dict[str, Any]:
         return {}
 
 
+def _chat_fn(d: Any) -> Callable[[str, str], str]:
+    provider = BudgetedProvider(d.make_llm_provider(), d.llm_budget())
+
+    def chat(system: str, user: str) -> str:
+        try:
+            return provider.chat(system, [Message("user", text=user)], []).message.text or ""
+        except Exception:  # noqa: BLE001 — model yoksa kurallar ve kod yine çalışır
+            return ""
+    return chat
+
+
+def _one_line(text: str, limit: int = 180) -> str:
+    t = (text or "").strip()
+    if "</think>" in t:
+        t = t.rsplit("</think>", 1)[1]
+    t = t.strip().strip('"').replace("\n", " ")
+    return t[:limit]
+
+
 def _owner_command(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
-    """Sahibin fısıltısı: önce ajan mesajı okuyup doğal bir cevap verir (sohbet adımı, araçsız tek LLM çağrısı);
-    mesaj bir iş istiyorsa ardından o işi oyuncu modunda (ışınlanmadan) yapar ve sonucu fısıldar."""
+    try:
+        return _owner_command_inner(ctx, p)
+    except InterruptedError:
+        raise
+    except Exception:
+        # Beklenmedik hata: sahip cevapsız kalmasın, ama olmayan bir başarı da söylenmesin
+        with contextlib.suppress(Exception), ctx._lease(1, [p["account"]], ) as (agents, _f):
+            agents[0].bridge.call("whisper", to=p["sender"], message="Bir hata oldu, bunu yapamadım.")
+        raise
+
+
+def _owner_command_inner(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
+    """Sahibin fısıltısı (bkz. qa/daemon/owner.py): niyet kurallarla (gerekirse modelle, sabit listeden) anlaşılır,
+    bilinen işler davranış adımlarıyla yürütülür ve sahibe giden rapor adımların GERÇEK sonucundan üretilir."""
+    from ..planner.explore import ExplorationManager
+    from ..scenario.runner import load_run_report
+    from . import owner as O
+
     d, acc, sender = ctx.daemon, p["account"], p["sender"]
     text = str(p["text"])[:400]
     ctx.progress(account=acc, text=text[:80])
+    chat = _chat_fn(d)
+    intent = O.classify(text, chat, sender, acc)
+    ctx.progress(intent=intent.kind, intent_source=intent.source)
     mem = _read_memory(ctx, acc)
-    with ctx._lease(1, [acc]) as (agents, _factory), d.agents.world_guard():
-        bridge = agents[0].bridge
-        st = bridge.call("get_player_state")
-        state = {k: st.get(k) for k in ("level", "hp", "max_hp", "gold", "map", "x", "y", "dead")}
-        history = [Message("assistant" if h["from"] == "me" else "user", text=h["text"]) for h in mem.get("chat", [])]
-        system = OWNER_CHAT_SYSTEM.format(account=acc, sender=sender, state=json.dumps(state, ensure_ascii=False),
-                                          activity=("oyunu oynuyordum (görev, avlanma, ekipman)"
-                                                    if d.cfg.daemon.player_mode else "boştaydım, bekliyordum"),
-                                          plan=(mem.get("summary") or "henüz yok")[:400])
-        provider = BudgetedProvider(d.make_llm_provider(), d.llm_budget())
-        try:
-            reply_text = provider.chat(system, history + [Message("user", text=text)], []).message.text
-        except Exception as e:  # noqa: BLE001 — LLM yoksa oyuncu yine de cevapsız kalmasın
-            reply_text = json.dumps({"reply": "Şu an düşünemiyorum, biraz sonra tekrar yazar mısın?", "task": None})
-            ctx.progress(chat_error=str(e)[:200])
-        reply, task = _parse_chat(reply_text)
-        with contextlib.suppress(Exception):
-            bridge.call("whisper", to=sender, message=reply[:200])
+    activity = "bekliyorum" if mem.get("paused") else (
+        "oyunu oynuyordum (görev, avlanma, ekipman)" if d.cfg.daemon.player_mode else "boştaydım")
+    out: dict[str, Any] = {"account": acc, "intent": intent.kind, "intent_source": intent.source}
+    said: list[str] = []
+
+    with ctx._lease(1, [acc]) as (agents, factory), d.agents.world_guard():
+        em = ExplorationManager(d.cfg, d.store, factory)
+        start = em.start(f"Sahip komutu ({sender}): {text}", acc, None, None, reset=False)
+        if not start["ok"]:
+            raise RuntimeError(f"Komut başlatılamadı: {start['error']}")
+        run_id = start["run_id"]
+        out["run_id"] = run_id
+        ctx._record(run_id, agents)
+
+        def step(_behaviour: str, **args: Any) -> dict[str, Any]:
+            ctx.check_cancel()
+            return em.step(run_id, {_behaviour: args or None})
+
+        def say(msg: str) -> None:
+            said.append(msg)
+            step("whisper", to=sender, message=msg[:200])
+
+        def ok(r: dict[str, Any]) -> bool:
+            return r.get("status") == "passed"
+
+        def err(r: dict[str, Any]) -> str:
+            return O.clean_error(r.get("error"))
+
+        final = None
+        k = intent.kind
+        if k == "chat":
+            st = start["state"]
+            facts = {x: st.get(x) for x in ("level", "gold", "hp", "max_hp")}
+            reply = _one_line(chat(CHAT_REPLY_SYSTEM.format(account=acc, sender=sender,
+                                                           state=json.dumps(facts, ensure_ascii=False)), text))
+            final = reply or "Selam!"
+        elif k == "status":
+            obs = em.observe(run_id)
+            final = O.status_text(obs["state"], obs.get("nearby") or [], activity, text,
+                                  (obs.get("inventory") or {}).get("items"), obs.get("quests"))
+        elif k == "pause":
+            _update_memory(ctx, acc, lambda e: e.update(paused=True))
+            final = "Tamam, burada bekliyorum. Devam etmemi istersen 'devam et' yaz."
+        elif k == "resume":
+            _update_memory(ctx, acc, lambda e: e.update(paused=False))
+            final = "Tamam, oynamaya devam ediyorum."
+        elif k == "come":
+            say("Geliyorum.")
+            r = step("go_to_player", name=sender)
+            final = "Yanındayım." if ok(r) else (
+                "Seni göremiyorum; hangi haritada ve neredesin?" if "PLAYER_NOT_VISIBLE" in str(r.get("error"))
+                else f"Gelemedim: {err(r)}")
+        elif k == "receive_trade":
+            gold0 = start["state"].get("gold") or 0
+            say("Geliyorum, sana ticaret açacağım.")
+            r = step("go_to_player", name=sender)
+            if ok(r):
+                r = step("trade_with", name=sender)
+            if not ok(r):
+                final = ("Seni göremiyorum; neredesin?" if "PLAYER_NOT_VISIBLE" in str(r.get("error"))
+                         else f"Ticaret açamadım: {err(r)}")
+            else:
+                say("Ticaret penceresini açtım; teklifini koyup onayla.")
+                r = step("trade_wait_and_accept", timeout_ms=120000)
+                gold1 = (em.observe(run_id)["state"].get("gold") or 0)
+                if ok(r) and (r.get("result") or {}).get("completed"):
+                    final = f"Aldım, teşekkürler! (+{gold1 - gold0} yang)" if gold1 > gold0 else "Aldım, teşekkürler!"
+                else:
+                    final = f"Ticaret tamamlanmadı: {err(r) or 'pencere kapandı'}"
+        elif k == "give":
+            obs = em.observe(run_id)
+            st, inv = obs["state"], (obs.get("inventory") or {}).get("items", [])
+            slot = None
+            final = None
+            if intent.gold:
+                if (st.get("gold") or 0) < intent.gold:
+                    final = f"Yeterli yangım yok (şu an {st.get('gold')} yang var)."
+            else:
+                q = npcdir.fold(intent.target or "")
+                have = [i for i in inv if q and q in npcdir.fold(i.get("name") or "")]
+                if not have:
+                    names = sorted({str(i.get("name") or i["vnum"]) for i in inv})
+                    final = (f"İstediğin eşya envanterimde yok. Bende olanlar: {', '.join(names[:12])}." if names
+                             else "İstediğin eşya envanterimde yok; envanterim boş.")
+                else:
+                    it = max(have, key=lambda i: i["count"])
+                    slot = it["slot"]
+                    if intent.count and intent.count < it["count"]:
+                        r = step("split_item", slot=slot, count=intent.count)
+                        if not ok(r):
+                            final = f"Yığını bölemedim: {err(r)}"
+                        else:
+                            slot = (r.get("result") or {}).get("slot")
+                    elif intent.count and intent.count > it["count"]:
+                        say(f"Bende yalnız {it['count']} tane var, hepsini veriyorum.")
+            if final is None:
+                say("Geliyorum, ticarete koyacağım.")
+                r = step("go_to_player", name=sender)
+                if ok(r):
+                    r = step("trade_with", name=sender)
+                if ok(r):
+                    r = step("trade_set_gold", amount=intent.gold) if intent.gold else step("trade_add_item", slot=slot)
+                if not ok(r):
+                    final = f"Veremedim: {err(r)}"
+                else:
+                    r = step("trade_accept")
+                    if ok(r) and (r.get("result") or {}).get("completed"):
+                        final = "Verdim."            # sahip zaten onaylamıştı
+                    else:
+                        say("Ticarete koydum ve onayladım; sen de onayla.")
+                        r = step("trade_wait_and_accept", timeout_ms=120000)
+                        final = ("Verdim." if ok(r) and (r.get("result") or {}).get("completed")
+                                 else f"Ticaret tamamlanmadı: {err(r) or 'pencere kapandı'}")
+        elif k == "hunt":
+            n = max(1, min(int(intent.count or 1), 50))
+            say(f"Tamam, {n} tane {intent.target} kesmeye gidiyorum.")
+            r = step("kill_monster", name=intent.target, count=n, timeout_ms=min(900000, 120000 + n * 60000))
+            kills = (r.get("result") or {}).get("kills", 0) if ok(r) else 0
+            final = f"{kills} tane {intent.target} kestim." if ok(r) else f"Kesemedim: {err(r)}"
+
+        if final is not None:
+            say(final)
+            em.finish(run_id, [], None, extra={"agent_summary": final, "stop_reason": "owner_command"})
+            out.update(reply=said[0] if said else final, report=final, said=said)
+        else:
+            say(f"Tamam, şunu yapıyorum: {(intent.task or text)[:150]}")
+            em.finish(run_id, [], None, extra={"agent_summary": "iş başlatıldı", "stop_reason": "owner_command"})
 
     def remember(entry: dict[str, Any]) -> None:
-        chat = entry.setdefault("chat", [])
-        chat += [{"from": sender, "text": text}, {"from": "me", "text": reply}]
-        del chat[:-CHAT_HISTORY]
+        chat_log = entry.setdefault("chat", [])
+        chat_log += [{"from": sender, "text": text}] + [{"from": "me", "text": x} for x in said]
+        del chat_log[:-CHAT_HISTORY]
 
+    if intent.kind != "task":
+        _update_memory(ctx, acc, remember)
+        return out
+
+    # Serbest iş: model oyuncu modunda yürütür (fısıltı aracı yok); rapor adımların gerçek sonucundan
+    task = (intent.task or text)[:300]
+    goal = OWNER_TASK_GOAL.format(sender=sender, text=text, task=task)
+    res = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=acc, player=True,
+                      exclude_tools={"whisper"})
+    rep = load_run_report(d.store, res["run_id"]) or {}
+    final = O.task_report(rep.get("steps") or [], res.get("stop_reason"))
+    with ctx._lease(1, [acc]) as (agents, _f), d.agents.world_guard():
+        with contextlib.suppress(Exception):
+            agents[0].bridge.call("whisper", to=sender, message=final[:200])
+    said.append(final)
     _update_memory(ctx, acc, remember)
-    ctx.progress(reply=reply[:120], task=(task or "")[:120])
-    out: dict[str, Any] = {"account": acc, "reply": reply, "task": task}
-    if task:
-        goal = OWNER_TASK_GOAL.format(sender=sender, text=text, reply=reply, task=task[:300])
-        res = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=acc, player=True)
-        out.update({k: res.get(k) for k in ("run_id", "result", "summary", "stop_reason")})
+    out.update(task=task, task_run_id=res.get("run_id"), report=final, said=said, stop_reason=res.get("stop_reason"))
     return out
 
 
@@ -338,7 +467,7 @@ def _play_session(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
         return d.agents.poll_whispers(agent, agent.bridge) > 0 or d.owner_command_pending(acc)
 
     out = ctx.explore(goal, d.cfg.daemon.player_session_steps, None, None, account=acc, player=True,
-                      should_stop=owner_waiting)
+                      should_stop=owner_waiting, exclude_tools={"whisper"})
     summary = (out.get("agent_summary") or "").strip()
     if summary:
         _update_memory(ctx, acc, lambda e: e.update(summary=summary[:1500], run_id=out.get("run_id")))

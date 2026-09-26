@@ -101,3 +101,21 @@ def test_skills_equipment_and_drop(b):
     inv = b.call("get_inventory")["items"]
     assert next(i["count"] for i in inv if i["slot"] == 0) == 2
     assert any(e["vid"] == 410 for e in b.call("get_nearby_entities", type="item"))
+
+
+def test_shop_closes_when_talking_to_another_npc_or_walking_away(b):
+    assert b.call("talk_to_npc", vid=SHOP_VID)["window"] == "shop"
+    b.call("talk_to_npc", vid=300)            # başka NPC: dükkân kapanır (gerçek istemci gibi)
+    assert not [w for w in b.call("get_open_windows") if w["name"] == "shop"]
+    assert b.call("talk_to_npc", vid=SHOP_VID)["window"] == "shop"      # yeniden açılabiliyor
+    b.call("move_to", x=5000, y=7000)          # satıcıdan uzaklaşma
+    b.call("wait", ms=200)
+    assert not [w for w in b.call("get_open_windows") if w["name"] == "shop"]
+
+
+def test_split_stack(b):
+    r = b.call("split_item", slot=0, count=1)          # 3 iksirden 1'ini ayır
+    inv = {i["slot"]: i["count"] for i in b.call("get_inventory")["items"]}
+    assert inv[0] == 2 and inv[r["slot"]] == 1
+    with pytest.raises(ActionError, match="BAD_COUNT"):
+        b.call("split_item", slot=0, count=2)

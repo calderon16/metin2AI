@@ -53,6 +53,7 @@ ACTION_COMMANDS: dict[str, str] = {
     "equip_item": "args: slot",
     "unequip_item": "args: wear_slot",
     "drop_item": "args: slot, count?",
+    "split_item": "args: slot, count — yığından count kadarını boş bir slota ayır (Shift+sürükle). yanıt: {slot}",
     "pickup": "args: vid (yerdeki item)",
     "talk_to_npc": "args: vid",
     "select_dialog": "args: index",
