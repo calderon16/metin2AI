@@ -47,9 +47,14 @@ class AgentState:
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def public(self) -> dict[str, Any]:
+        snap = dict(self.snapshot)
+        if snap.get("map") is not None:
+            from ..engine import npcdir
+
+            snap["place"] = npcdir.place(snap.get("map"), snap.get("x"), snap.get("y"))
         return {"account": self.account, "character": self.character, "keep_online": self.keep_online,
                 "tags": self.tags, "status": self.status, "enabled": self.enabled, "job_id": self.job_id,
-                "snapshot": self.snapshot, "last_error": self.last_error, "connected_at": self.connected_at,
+                "snapshot": snap, "last_error": self.last_error, "connected_at": self.connected_at,
                 "reconnects": self.reconnects}
 
 

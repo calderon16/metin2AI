@@ -150,6 +150,37 @@ def npcs_on_map(map_index: int | None) -> list[dict[str, Any]]:
     return list((d["maps"].get(str(map_index)) or {}).get("npcs") or [])
 
 
+# Krallık köyleri (a = Kırmızı/Shinsoo, b = Sarı/Chunjo, c = Mavi/Jinno; 1 = ilk köy, 3 = ikinci köy)
+MAP_TITLES = {
+    "metin2_map_a1": "Kırmızı krallık 1. köy", "metin2_map_a3": "Kırmızı krallık 2. köy",
+    "metin2_map_b1": "Sarı krallık 1. köy", "metin2_map_b3": "Sarı krallık 2. köy",
+    "metin2_map_c1": "Mavi krallık 1. köy", "metin2_map_c3": "Mavi krallık 2. köy",
+    "map_n_threeway": "Seungryong Vadisi", "metin2_map_n_desert_01": "Yongbi Çölü", "map_n_snowm_01": "Sohan Dağı",
+    "metin2_map_n_flame_01": "Doyyumhwan", "metin2_map_milgyo": "Hwang Tapınağı", "metin2_map_trent": "Hayalet Ormanı",
+    "metin2_map_trent02": "Kızıl Orman", "metin2_map_deviltower1": "Şeytan Kulesi",
+    "metin2_map_spiderdungeon": "Örümcek Zindanı", "metin2_map_spiderdungeon_02": "Örümcek Zindanı 2",
+}
+
+
+def place(map_index: Any, x: Any, y: Any) -> str:
+    """"Kırmızı krallık 1. köy (4692, 9517) — Silah Satıcısı yakını": harita adı, metre koordinat, en yakın NPC."""
+    d = load() or {}
+    m = (d.get("maps") or {}).get(str(map_index)) or {}
+    name = MAP_TITLES.get(m.get("name", ""), m.get("name") or f"harita {map_index}")
+    try:
+        fx, fy = float(x), float(y)
+    except (TypeError, ValueError):
+        return name
+    text = f"{name} ({int(fx) // 100}, {int(fy) // 100})"
+    npcs = m.get("npcs") or []
+    if npcs:
+        n = min(npcs, key=lambda r: (r["x"] - fx) ** 2 + (r["y"] - fy) ** 2)
+        dist = ((n["x"] - fx) ** 2 + (n["y"] - fy) ** 2) ** 0.5
+        if dist <= 3000:
+            text += f" — {n['name']} yakını"
+    return text
+
+
 def item_name(vnum: Any) -> str:
     d = load()
     return str(((d or {}).get("items") or {}).get(str(vnum)) or vnum)

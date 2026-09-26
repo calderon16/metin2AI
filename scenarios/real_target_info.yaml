@@ -1,6 +1,6 @@
 name: real_target_info
 description: Gerçek sunucu — hedef düşüş bilgisi ("?" düğmesi, /target_info). Yabani Köpek avlanır, düşüş listesi istenir.
-tags: [real, target_info, drop]
+tags: [real, real_only, target_info, drop]
 covers: ["mr2_systems.cpp", "item_manager.cpp", "cmd.cpp"]
 account: AI_QA_001
 setup:

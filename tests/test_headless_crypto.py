@@ -310,7 +310,7 @@ def test_owner_trade_both_directions_reports_only_what_happened(improved_prof, c
         assert got[6] == "İstediğin eşya envanterimde yok; envanterim boş."    # iksirleri az önce verdi
         server.owner_whisper("neredesin")
         got = _wait_whispers(server, 8)
-        assert got[7].startswith("Seviye 10, 500 yang, HP ") and "(5000, 5000)" in got[7], got[7]
+        assert got[7].startswith("Seviye 10, 500 yang, HP ") and "harita 1 (50, 50)" in got[7], got[7]
         server.owner_whisper("envanterinde ne var")      # model "status" der; cevap gerçek envanterden
         got = _wait_whispers(server, 9)
         assert got[8] == "Envanterim boş."

@@ -168,14 +168,11 @@ def status_text(state: dict[str, Any], nearby: list[dict[str, Any]], activity: s
                 objs = ", ".join(f"{o['label']} {o['cur']}/{o['max']}" for o in v.get("objs") or [])
                 rows.append(f"{v.get('title') or qid} ({st}{': ' + objs if objs else ''})")
         return ("Görevlerim: " + "; ".join(rows[:6]) + ".") if rows else "Şu an alınabilir ya da süren görevim yok."
-    maps = (npcdir.load() or {}).get("maps") or {}
-    mname = (maps.get(str(state.get("map"))) or {}).get("name") or f"harita {state.get('map')}"
-    npcs = [e for e in nearby if e.get("type") == "npc" and e.get("name")]
-    near = f", {npcs[0]['name']} yakınında" if npcs else ""
+    where = npcdir.place(state.get("map"), state.get("x"), state.get("y"))
     parts = [f"Seviye {state.get('level')}", f"{state.get('gold')} yang", f"HP {state.get('hp')}/{state.get('max_hp')}"]
     if state.get("dead"):
         parts.append("şu an ölüyüm")
-    return f"{', '.join(parts)}. {mname} ({state.get('x')}, {state.get('y')}){near}. Şu an: {activity}."
+    return f"{', '.join(parts)}. {where}. Şu an: {activity}."
 
 
 def _item(vnum: Any) -> str:

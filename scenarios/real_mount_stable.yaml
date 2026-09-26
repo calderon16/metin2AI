@@ -1,6 +1,6 @@
 name: real_mount_stable
 description: Gerçek sunucu — evcilleştirme binekleri. Kurt mühürü kullanılır, ahıra kaydolur, bine/yem ver/in.
-tags: [real, mount]
+tags: [real, real_only, mount]
 covers: ["mr2_systems.cpp", "char_item.cpp", "cmd.cpp"]
 account: AI_QA_001
 setup:
