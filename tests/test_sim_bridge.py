@@ -71,3 +71,20 @@ def test_real_client_bridge_implements_protocol():
     src = (Path(__file__).resolve().parents[1] / "integration/client/qa_bridge.py").read_text(encoding="utf-8")
     client = set(re.findall(r"^def cmd_(\w+)\(", src, re.M)) | {"wait"}
     assert set(ALL_COMMANDS) - set(SIM_COMMANDS) - client == set()
+
+
+def test_sim_refine_at_blacksmith():
+    b = LocalBridge(SimClient(SimWorld(seed=1)).handle)
+    _login(b)
+    for cmd in ("/qa item 10", "/qa item 30000 2", "/qa gold 500"):
+        b.call("send_chat", message=cmd)
+    inv = {i["vnum"]: i["slot"] for i in b.call("get_inventory")["items"]}
+    smith = next(e for e in b.call("get_nearby_entities", type="npc", radius=20000) if e["vnum"] == 20016)
+    b.call("move_to", x=smith["x"] + 100, y=smith["y"])
+    b.call("wait", ms=5000)
+    info = b.call("refine_item", slot=inv[10], npc_vid=smith["vid"], confirm=False)
+    assert (info["confirmed"], info["result_vnum"], info["cost"]) == (False, 11, 300)
+    r = b.call("refine_item", slot=inv[10], npc_vid=smith["vid"])
+    assert r["result"] == "success" and r["gold"] == 200
+    assert {i["vnum"] for i in b.call("get_inventory")["items"]} >= {11} and 30000 not in \
+        {i["vnum"] for i in b.call("get_inventory")["items"]}

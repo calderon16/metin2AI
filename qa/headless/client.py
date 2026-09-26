@@ -41,8 +41,7 @@ class HeadlessError(Exception):
 
 
 NOT_SUPPORTED = {
-    "buy_item", "sell_item", "use_skill", "unequip_item", "drop_item", "change_channel",
-    "party_invite", "party_answer", "party_leave", "party_kick",
+    "change_channel", "party_invite", "party_answer", "party_leave", "party_kick",
 }
 
 
@@ -85,6 +84,11 @@ class HeadlessClient:
         self.quests_available: dict[str, dict[str, Any]] = {}
         self.quests_done: set[str] = set()
         self.trade: dict[str, Any] | None = None
+        self.shop: dict[str, Any] | None = None          # açık NPC dükkânı {npc_vid, items}
+        self._shop_result: str | None = None             # son dükkân hata yanıtı (GC_NOT_ENOUGH_MONEY...)
+        self.refine_window: dict[str, Any] | None = None  # sunucunun açtığı yükseltme penceresi
+        self.skills: dict[int, int] = {}                 # beceri vnum -> seviye (GC_SKILL_LEVEL_NEW)
+        self._last_click: int | None = None
         self.whispers: list[dict[str, Any]] = []
         self._wsp_seq = 0
         self.messages: list[dict[str, Any]] = []
@@ -158,10 +162,15 @@ class HeadlessClient:
     def _leave_cleanly(self) -> None:
         """Oyundan çıkmadan önce açık görev penceresini kapat. Sunucu, bağlantı kopsa da karakterin görev
         durumunu (cevap bekleyen seçim dahil) tutar; kapatılmazsa sonraki oturumda o görev menüde görünmez."""
-        if self.conn is None or not self.in_game or self.dialog is None:
+        if self.conn is None or not self.in_game:
             return
         try:
-            self._close_dialog()
+            if self.dialog is not None:
+                self._close_dialog()
+            if self.refine_window is not None:
+                self._cancel_refine()
+            if self.shop is not None:
+                self._close_shop()
         except (ProtocolError, HeadlessError):
             pass
 
@@ -207,6 +216,16 @@ class HeadlessClient:
             if self.conn is None:
                 raise HeadlessError("DISCONNECTED", f"{what} beklenirken bağlantı koptu")
             self._pump(50)
+
+    def _pump_for(self, cond: Callable[[], bool], timeout_s: float) -> bool:
+        """cond doğru olana ya da süre dolana kadar paket işle (hata atmaz)."""
+        deadline = time.monotonic() + timeout_s
+        while not cond() and time.monotonic() < deadline and self.conn is not None:
+            self._pump(50)
+        return cond()
+
+    def _msgs_since(self, seq: int) -> list[str]:
+        return [m["text"] for m in self.messages if m["seq"] > seq]
 
     def _send(self, logical: str, trailing: bytes = b"", **kv: Any) -> None:
         if self.conn is None:
@@ -318,6 +337,19 @@ class HeadlessClient:
             self._on_exchange(g)
         elif logical == "whisper":
             self._on_whisper(g, p.trailing)
+        elif logical == "shop":
+            self._on_shop(g, p.trailing)
+        elif logical == "refine_info":
+            t = g("table") or {}
+            mats = [{"vnum": m.get("vnum"), "count": m.get("count")}
+                    for m in (t.get("materials") or [])[:int(t.get("material_count") or 0)]]
+            self.refine_window = {"slot": g("pos"), "type": g("type", 0), "src_vnum": t.get("src_vnum"),
+                                  "result_vnum": t.get("result_vnum"), "cost": t.get("cost"),
+                                  "prob": t.get("prob"), "materials": mats}
+            self.event("window_opened", name="refine")
+        elif logical == "skill_levels":
+            self.skills = {i: int(s.get("bLevel", 0)) for i, s in enumerate(g("skills", []) or [])
+                           if isinstance(s, dict) and s.get("bLevel")}
 
     def _do_warp(self) -> None:
         """Yeni çekirdeğe bağlan ve aynı karakterle doğrudan oyuna gir (gerçek istemcinin DirectEnter akışı)."""
@@ -480,6 +512,37 @@ class HeadlessClient:
             self.log(f"MRQ ayrıştırılamadı: {text}")
 
     # ------------------------------------------------------------------ ticaret (CG/GC_EXCHANGE)
+    def _on_shop(self, g: Callable[..., Any], raw: bytes) -> None:
+        subs = self.b["shop_subheaders"]
+        sub = g("sub")
+        st = self.b["shop_item_struct"]
+        if sub == subs["GC_START"]:
+            size, n = self.profile.sizeof(st), self.b["shop_max_items"]
+            off = max(0, len(raw) - size * n)      # sunucu önce DWORD owner_vid gönderir
+            owner = int.from_bytes(raw[:4], "little") if off >= 4 else self._last_click
+            items = []
+            for i in range(n):
+                if off + size > len(raw):
+                    break
+                it, off = self.profile.decode(st, raw, off)
+                if it.get("vnum"):
+                    items.append({"slot": i, "vnum": it["vnum"], "price": it.get("price", 0),
+                                  "count": it.get("count", 1)})
+            self.shop = {"npc_vid": owner or self._last_click, "items": items}
+            self.event("window_opened", name="shop")
+        elif sub == subs["GC_END"]:
+            self.shop = None
+        elif sub == subs["GC_UPDATE_ITEM"] and self.shop is not None and len(raw) > 1:
+            it, _ = self.profile.decode(st, raw, 1)
+            rest = [i for i in self.shop["items"] if i["slot"] != raw[0]]
+            if it.get("vnum"):
+                rest.append({"slot": raw[0], "vnum": it["vnum"], "price": it.get("price", 0),
+                             "count": it.get("count", 1)})
+            self.shop["items"] = sorted(rest, key=lambda i: i["slot"])
+        else:
+            names = {v: k for k, v in subs.items() if k.startswith("GC_")}
+            self._shop_result = names.get(sub, str(sub))
+
     def _xsub(self, key: str) -> int:
         return int(self.b["exchange_subheaders"][key])
 
@@ -647,7 +710,8 @@ class HeadlessClient:
                 "max_hp": self._point("MAX_HP"), "sp": self._point("SP"), "max_sp": self._point("MAX_SP"),
                 "gold": self._point("GOLD"), "x": round(self.me["x"]), "y": round(self.me["y"]), "map": self._map_index(),
                 "channel": self.cfg.channel, "dead": self.dead, "moving": self.dest is not None,
-                "attacking": self.attacking, "target_vid": self.target}
+                "attacking": self.attacking, "target_vid": self.target,
+                "skills": {str(v): lv for v, lv in sorted(self.skills.items())}}
 
     def cmd_get_inventory(self) -> dict[str, Any]:
         self._need_game()
@@ -692,6 +756,11 @@ class HeadlessClient:
 
     def cmd_get_open_windows(self) -> list[dict[str, Any]]:
         out = [{"name": "dialog", "text": self.dialog["text"], "options": self.dialog["options"]}] if self.dialog else []
+        if self.shop is not None:
+            out.append({"name": "shop", "npc_vid": self.shop["npc_vid"],
+                        "items": [{**i, "name": str(i["vnum"])} for i in self.shop["items"]]})
+        if self.refine_window is not None:
+            out.append({"name": "refine", **self.refine_window})
         if self.trade is not None:
             out.append({"name": "trade", **self._trade_view()})
         if self.quest_letters:
@@ -908,9 +977,10 @@ class HeadlessClient:
             # başka NPC'lerdeki seçeneklerini menüye koymaz.
             self.log("açık diyalog kapatıldı (yeni NPC'ye tıklamadan önce)")
             self._close_dialog()
+        self._last_click = int(vid)
         self._send("on_click", vid=int(vid))
         self._pump(300)
-        return {"window": "dialog" if self.dialog else None}
+        return {"window": "shop" if self.shop is not None else "dialog" if self.dialog else None}
 
     def cmd_select_dialog(self, index: int) -> dict[str, Any]:
         self._need_alive()
@@ -935,7 +1005,170 @@ class HeadlessClient:
     def cmd_close_window(self, name: str) -> dict[str, Any]:
         if name == "dialog" and self.dialog:
             self._close_dialog()
+        elif name == "shop" and self.shop is not None:
+            self._close_shop()
+        elif name == "refine" and self.refine_window is not None:
+            self._cancel_refine()
         return {}
+
+    # ------------------------------------------------------------------ dükkân
+    def _close_shop(self) -> None:
+        self.shop = None
+        self._send("shop", sub=self.b["shop_subheaders"]["CG_END"])
+        self._pump(150)
+
+    SHOP_ERRORS = {"GC_NOT_ENOUGH_MONEY": ("NOT_ENOUGH_GOLD", "Yetersiz yang"),
+                   "GC_INVENTORY_FULL": ("INVENTORY_FULL", "Envanter dolu"),
+                   "GC_SOLDOUT": ("SOLD_OUT", "Tükendi"), "GC_INVALID_POS": ("BAD_SLOT", "Geçersiz dükkân slotu")}
+
+    def cmd_buy_item(self, slot: int) -> dict[str, Any]:
+        self._need_alive()
+        if self.shop is None:
+            raise HeadlessError("NO_SHOP", "Açık dükkân yok (önce satıcı NPC ile konuş)")
+        it = next((i for i in self.shop["items"] if i["slot"] == int(slot)), None)
+        if it is None:
+            raise HeadlessError("BAD_SLOT", f"Dükkânda {slot}. slot boş")
+        gold0 = self._point("GOLD", 0) or 0
+        self._shop_result = None
+        # Başarılı alımda sunucu yanıt paketi göndermez (shop_manager.cpp Buy): yang/envanter değişimini bekle
+        self._send("shop", trailing=bytes([1, int(slot)]), sub=self.b["shop_subheaders"]["CG_BUY"])
+        self._pump_for(lambda: self._shop_result is not None or (self._point("GOLD", 0) or 0) != gold0, 2.0)
+        self._pump(150)
+        if self._shop_result in self.SHOP_ERRORS:
+            raise HeadlessError(*self.SHOP_ERRORS[self._shop_result])
+        gold = self._point("GOLD", 0) or 0
+        return {"vnum": it["vnum"], "price": it["price"], "gold": gold, "confirmed": gold != gold0}
+
+    def cmd_sell_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
+        self._need_alive()
+        if self.shop is None:
+            raise HeadlessError("NO_SHOP", "Açık dükkân yok (önce satıcı NPC ile konuş)")
+        slot = int(slot)
+        self._item_pos(slot)
+        have = int(self.items[slot].get("count") or 1)
+        n = have if count is None else int(count)
+        if not 0 < n <= have:
+            raise HeadlessError("BAD_COUNT", "Geçersiz adet")
+        gold0, since = self._point("GOLD", 0) or 0, self._msg_seq
+        self._send("shop", trailing=bytes([slot, n]), sub=self.b["shop_subheaders"]["CG_SELL2"])
+        self._pump_for(lambda: (self._point("GOLD", 0) or 0) != gold0, 2.0)
+        gold = self._point("GOLD", 0) or 0
+        if gold == gold0:
+            why = self._msgs_since(since)
+            raise HeadlessError("SELL_REFUSED", "Satış olmadı" + (f": {why[-1]}" if why else ""))
+        return {"gold": gold, "price": gold - gold0}
+
+    # ------------------------------------------------------------------ yükseltme (+)
+    def _cancel_refine(self) -> None:
+        w, self.refine_window = self.refine_window, None
+        if w is not None:
+            self._send("refine", pos=int(w["slot"]), type=self.b["refine_cancel_type"])
+            self._pump(100)
+
+    def _nearest_blacksmith(self) -> int:
+        smiths = [c for c in self.chars.values() if c["type"] == "npc" and c["race"] in self.b["blacksmith_vnums"]]
+        if not smiths:
+            raise HeadlessError("NO_BLACKSMITH", "Yakında demirci yok (köydeki demirciye yürü)")
+        return min(smiths, key=lambda c: _dist(self.me["x"], self.me["y"], c["x"], c["y"]))["vid"]
+
+    def cmd_refine_item(self, slot: int, npc_vid: int | None = None, scroll_slot: int | None = None,
+                        confirm: bool = True) -> dict[str, Any]:
+        """Normal oyuncu gibi yükselt: eşyayı demirciye ver (ya da kâğıdı eşyaya sürükle), sunucunun
+        açtığı pencereyi (ücret, şans, malzeme) gör ve onayla. confirm=False yalnız bilgiyi gösterir."""
+        self._need_alive()
+        slot = int(slot)
+        pos = self._item_pos(slot)
+        if self.dialog is not None:
+            self._close_dialog()
+        self.refine_window = None
+        since = self._msg_seq
+        if scroll_slot is not None:
+            self._send("item_use_to_item", source=self._item_pos(int(scroll_slot)), target=pos)
+        else:
+            vid = int(npc_vid) if npc_vid is not None else self._nearest_blacksmith()
+            self._in_range(self._entity(vid), self.b["interact_range"])
+            self._send("give_item", vid=vid, pos=pos, count=1)
+        if not self._pump_for(lambda: self.refine_window is not None, 3.0):
+            why = self._msgs_since(since)
+            raise HeadlessError("REFINE_REFUSED", "Yükseltme penceresi açılmadı" + (f": {why[-1]}" if why else
+                                " (eşya yükseltilemiyor olabilir)"))
+        info = {k: v for k, v in self.refine_window.items() if k != "slot"}
+        if not confirm:
+            self._cancel_refine()
+            return {"confirmed": False, **info}
+        gold = self._point("GOLD", 0) or 0
+        lacking = [m for m in info["materials"]
+                   if sum(v["count"] for c, v in self.items.items() if v["vnum"] == m["vnum"] and c < self.b["inventory_size"])
+                   < (m["count"] or 0)]
+        if (info["cost"] or 0) > gold or lacking:
+            self._cancel_refine()
+            if lacking:
+                raise HeadlessError("MISSING_MATERIALS", f"Eksik malzeme: {lacking}")
+            raise HeadlessError("NOT_ENOUGH_GOLD", f"Yükseltme ücreti {info['cost']} yang, sende {gold}")
+        w, self.refine_window = self.refine_window, None
+        since = self._msg_seq
+        self._send("refine", pos=int(w["slot"]), type=int(w["type"] or 0))
+        done = lambda: any(t in ("RefineSuceeded", "RefineFailed") for t in self._msgs_since(since))  # noqa: E731
+        self._pump_for(done, 3.0)
+        self._pump(150)
+        msgs = self._msgs_since(since)
+        if "RefineSuceeded" in msgs:
+            result = "success"
+        elif "RefineFailed" in msgs:
+            result = "failed"
+        else:
+            raise HeadlessError("REFINE_REJECTED", "Sunucu yükseltmeyi yapmadı" + (f": {msgs[-1]}" if msgs else ""))
+        return {"confirmed": True, "result": result, **info, "slot_vnum": self.items.get(slot, {}).get("vnum"),
+                "gold": self._point("GOLD", 0)}
+
+    # ------------------------------------------------------------------ beceri / ekipman / eşya bırakma
+    def cmd_use_skill(self, slot: int) -> dict[str, Any]:
+        """slot = beceri vnum'u (get_player_state.skills). Gerçek istemci gibi önce CG_USE_SKILL, hedefli
+        saldırı becerisinde ardından beceri türlü tek vuruş (sunucu vuruş sayısını kullanım başına sınırlar)."""
+        self._need_alive()
+        vnum = int(slot)
+        if self.skills and self.skills.get(vnum, 0) <= 0:
+            raise HeadlessError("SKILL_NOT_LEARNED", f"Beceri {vnum} öğrenilmemiş (öğrenilenler: "
+                                f"{sorted(self.skills)})")
+        since = self._msg_seq
+        t = self.chars.get(self.target) if self.target else None
+        self._send("use_skill", vnum=vnum, vid=int(t["vid"]) if t else 0)
+        self._pump(250)
+        if t is not None and t["type"] == "monster" and not t.get("dead") \
+                and _dist(self.me["x"], self.me["y"], t["x"], t["y"]) <= self.b["attack_range"]:
+            self._send("attack", type=vnum, vid=t["vid"])
+            self._pump(150)
+        return {"skill": vnum, "target_vid": t["vid"] if t else None, "messages": self._msgs_since(since)[-3:]}
+
+    def cmd_unequip_item(self, wear_slot: str) -> dict[str, Any]:
+        self._need_alive()
+        wear = [k for k, v in self.b["wear_names"].items() if v == wear_slot]
+        if not wear:
+            raise HeadlessError("BAD_ARGS", f"Bilinmeyen ekipman yeri: {wear_slot}")
+        cell = self.b["inventory_size"] + int(wear[0])
+        if cell not in self.items:
+            raise HeadlessError("EMPTY_SLOT", "Ekipman yeri boş")
+        vnum = self.items[cell]["vnum"]
+        self._send("item_use", pos={"window_type": self.b["inventory_window"], "cell": cell})  # giyiliye sağ tık
+        self._pump_for(lambda: cell not in self.items, 1.5)
+        if cell in self.items:
+            raise HeadlessError("UNEQUIP_FAILED", "Çıkarılamadı (envanter dolu olabilir)")
+        slot = next((c for c, v in sorted(self.items.items()) if v["vnum"] == vnum and c < self.b["inventory_size"]),
+                    None)
+        return {"slot": slot}
+
+    def cmd_drop_item(self, slot: int, count: int | None = None) -> dict[str, Any]:
+        self._need_alive()
+        slot = int(slot)
+        pos = self._item_pos(slot)
+        have = int(self.items[slot].get("count") or 1)
+        n = have if count is None else int(count)
+        if not 0 < n <= have:
+            raise HeadlessError("BAD_COUNT", "Geçersiz adet")
+        vnum = self.items[slot]["vnum"]
+        self._send("item_drop", pos=pos, gold=0, count=n)
+        self._pump(300)
+        return {"vnum": vnum, "count": n}
 
     # ------------------------------------------------------------------ ticaret
     def cmd_trade_request(self, vid: int) -> dict[str, Any]:

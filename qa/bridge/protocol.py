@@ -48,7 +48,7 @@ ACTION_COMMANDS: dict[str, str] = {
     "target": "args: vid",
     "attack": "Seçili hedefe saldırı başlat",
     "stop_attack": "",
-    "use_skill": "args: slot",
+    "use_skill": "args: slot (headless: beceri vnum'u — get_player_state.skills)",
     "use_item": "args: slot",
     "equip_item": "args: slot",
     "unequip_item": "args: wear_slot",
@@ -59,6 +59,9 @@ ACTION_COMMANDS: dict[str, str] = {
     "close_window": "args: name",
     "buy_item": "args: slot (shop slotu)",
     "sell_item": "args: slot, count?",
+    "refine_item": "args: slot, npc_vid? (demirci), scroll_slot? (yükseltme kâğıdı), confirm? — + basma. "
+                   "Yanıt: {confirmed, result: success|failed, src_vnum, result_vnum, cost, prob, materials} "
+                   "ya da (gerçek istemci) {pending: true}",
     "send_chat": "args: message",
     "whisper": "args: to (oyuncu adı), message — fısıltı gönder",
     "respawn": "args: here? (true: olduğun yerde)",

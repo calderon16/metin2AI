@@ -52,6 +52,9 @@ class PacketConnection:
         self._switch_on: str | None = None
         # header numarası → {flag_offset, base, fields{bit: bayt}} (bkz. bindings "flag_sized")
         self.flag_sized: dict[int, dict[str, Any]] = {}
+        # Sabit struct'tan sonra işleyicinin ek bayt okuduğu gelen paketler (sunucu tarafı Analyze dönüşü,
+        # ör. CG_SHOP BUY): header numarası → fn(tampon) -> ek bayt sayısı ya da None (henüz belli değil)
+        self.extra_sized: dict[int, Any] = {}
 
     def switch_crypto_after(self, packet_name: str, crypto: Crypto) -> None:
         """`packet_name` alındığı anda (ve sonrasında gelen/giden her bayta) `crypto` uygulanır."""
@@ -161,7 +164,16 @@ class PacketConnection:
             if len(self._buf) < 3:
                 return None
             return struct.unpack_from("<H", self._buf, 1)[0] + extra
-        return self.profile.sizeof(info["struct"]) + extra
+        base = self.profile.sizeof(info["struct"])
+        fn = self.extra_sized.get(hv)
+        if fn is not None:
+            if len(self._buf) < base:
+                return None
+            more = fn(self._buf)
+            if more is None:
+                return None
+            base += more
+        return base + extra
 
     def _has_sequence(self, info: dict[str, Any]) -> bool:
         return bool(self.profile.sequence and info.get("sequence"))

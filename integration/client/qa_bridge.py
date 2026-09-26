@@ -123,6 +123,7 @@ def OnLoginFailure(reason):
 
 def OnEnterGame():
 	_in_game[0] = True
+	_hook_refine()
 	_event("map_loaded", {"map": _map_name()})
 	if "select" in _pending:
 		_ok(_pending.pop("select"), {"name": player.GetName(), "map": _map_name()})
@@ -130,6 +131,7 @@ def OnEnterGame():
 
 def OnLeaveGame():
 	_in_game[0] = False
+	_REFINE["info"] = None
 	_dialog[0] = None
 	_shop[0] = None
 	_trade[0] = None
@@ -321,6 +323,8 @@ def cmd_get_open_windows(a):
 		out.append(dict({"name": "trade"}, **_trade_view()))
 	if _party_invite[0]:
 		out.append(dict({"name": "party_invite"}, **_party_invite[0]))
+	if _REFINE["info"] is not None:
+		out.append(dict({"name": "refine"}, **_REFINE["info"]))
 	return out
 
 
@@ -655,6 +659,8 @@ def cmd_close_window(a):
 		net.SendExchangeExitPacket()
 	elif a["name"] == "party_invite" and _party_invite[0]:
 		return cmd_party_answer({"accept": False})
+	elif a["name"] == "refine" and _REFINE["info"] is not None:
+		return cmd_refine_item({"slot": _REFINE["info"]["slot"], "confirm": False})
 	return {}
 
 
@@ -671,6 +677,99 @@ def cmd_sell_item(a):
 	slot = int(a["slot"])
 	net.SendShopSellPacketNew(slot, int(a.get("count") or player.GetItemCount(slot)))
 	return {}
+
+
+# ------------------------------------------------------------------ yükseltme (+)
+_REFINE = {"hooked": False, "win": None, "info": None}
+
+
+def _hook_refine():
+	"""game.GameWindow'un yükseltme kancalarını sar: açılan pencere bilgisi ve sonuç olayı (C++ değişmez)."""
+	if _REFINE["hooked"]:
+		return
+	try:
+		import game
+	except ImportError:
+		return
+	gw = game.GameWindow
+	o_open = getattr(gw, "OpenRefineDialog", None)
+	o_mat = getattr(gw, "AppendMaterialToRefineDialog", None)
+	o_ok = getattr(gw, "RefineSuceededMessage", None)
+	o_fail = getattr(gw, "RefineFailedMessage", None)
+	if o_open is None:
+		return
+
+	def OpenRefineDialog(self, targetItemPos, nextGradeItemVnum, cost, prob, type=0):
+		_REFINE["win"] = self
+		_REFINE["info"] = {"slot": targetItemPos, "src_vnum": player.GetItemIndex(targetItemPos),
+			"result_vnum": nextGradeItemVnum, "cost": cost, "prob": prob, "type": type, "materials": []}
+		_event("window_opened", {"name": "refine"})
+		return o_open(self, targetItemPos, nextGradeItemVnum, cost, prob, type)
+
+	def AppendMaterialToRefineDialog(self, vnum, count):
+		if _REFINE["info"] is not None:
+			_REFINE["info"]["materials"].append({"vnum": vnum, "count": count})
+		return o_mat(self, vnum, count)
+
+	def RefineSuceededMessage(self):
+		_event("refine_result", {"result": "success"})
+		return o_ok(self)
+
+	def RefineFailedMessage(self):
+		_event("refine_result", {"result": "failed"})
+		return o_fail(self)
+
+	gw.OpenRefineDialog = OpenRefineDialog
+	if o_mat is not None:
+		gw.AppendMaterialToRefineDialog = AppendMaterialToRefineDialog
+	if o_ok is not None:
+		gw.RefineSuceededMessage = RefineSuceededMessage
+	if o_fail is not None:
+		gw.RefineFailedMessage = RefineFailedMessage
+	_REFINE["hooked"] = True
+
+
+def _refine_dialog():
+	w = _REFINE["win"]
+	try:
+		return w.interface.dlgRefineNew
+	except AttributeError:
+		return None
+
+
+def cmd_refine_item(a):
+	"""Iki adim: pencere yoksa esyayi demirciye verir / kagidi esyaya surukler ({pending: true});
+	pencere acildiktan sonra ayni komut onaylar (sonuc: refine_result olayi) ya da vazgecer."""
+	_need_game()
+	_hook_refine()
+	slot = int(a["slot"])
+	info = _REFINE["info"]
+	if info is not None and info["slot"] == slot:
+		_REFINE["info"] = None
+		dlg = _refine_dialog()
+		out = dict(info)
+		out.pop("slot", None)
+		if not a.get("confirm", True):
+			if dlg is not None:
+				dlg.CancelRefine()
+			else:
+				net.SendRefinePacket(255, 255)
+			out["confirmed"] = False
+			return out
+		if dlg is not None:
+			dlg.Accept()
+		else:
+			net.SendRefinePacket(slot, info["type"])
+		out["confirmed"] = True
+		out["pending"] = True
+		return out
+	if a.get("scroll_slot") is not None:
+		net.SendItemUseToItemPacket(int(a["scroll_slot"]), slot)
+	elif a.get("npc_vid") is not None:
+		net.SendGiveItemPacket(int(a["npc_vid"]), slot, 1)
+	else:
+		raise QaError("BAD_ARGS", "npc_vid ya da scroll_slot gerekli")
+	return {"pending": True}
 
 
 def cmd_send_chat(a):

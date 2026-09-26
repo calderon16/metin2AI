@@ -24,6 +24,8 @@ HANDSHAKE = 0x1234ABCD
 LOGIN_KEY = 777
 MOB_VID, NPC_VID, ME_VID = 200, 300, 100
 PC_VID = 500          # improved profilde: ticareti kabul eden gerçek oyuncu (TESTR)
+SHOP_VID, SMITH_VID = 320, 330   # oyuncu paketleri olan profilde: silah satıcısı ve demirci
+SHOP_ITEMS = [(10, 100), (27001, 50)]   # (vnum, fiyat)
 MAX_STEP = 400  # tek MOVE paketinde izin verilen en büyük mesafe (hız kontrolü)
 
 
@@ -54,6 +56,11 @@ class _Handler(socketserver.BaseRequestHandler):
         self.pending = None
         self.trade = None
         self.key_agreement: ImprovedKeyAgreement | None = None
+        self.player_packets = "HEADER_GC_SHOP" in self.server.profile.packets
+        if self.player_packets:
+            # input_main.cpp Shop: BUY → [adet, sıra], SELL → [hücre], SELL2 → [hücre, adet]
+            self.c.extra_sized[self.server.profile.header("HEADER_CG_SHOP")] =                 lambda buf: {1: 2, 2: 1, 3: 2}.get(buf[1], 0)
+        self.refining: tuple[int, int] | None = None
 
     def send(self, header: str, **v: Any) -> None:
         self.c.send(header, v)
@@ -132,6 +139,10 @@ class _Handler(socketserver.BaseRequestHandler):
             pts[1], pts[3], pts[5], pts[6], pts[7], pts[8], pts[11] = 10, 0, 400, 400, 100, 100, 0
             self.send("HEADER_GC_CHARACTER_POINTS", points=pts)
             self.item(0, 27001, 3)
+            if self.player_packets:
+                self.me["items"].update({2: [10, 1], 90: [11200, 1]})   # envanterde kılıç, sırtta zırh
+                self.item(2, 10, 1)
+                self.item(90, 11200, 1)
         elif name == "HEADER_CG_ENTERGAME":
             self.phase("PHASE_GAME")
             self.send("HEADER_GC_CHARACTER_ADD", dwVID=MOB_VID, x=5200, y=5000, bType=0, wRaceNum=101)
@@ -141,6 +152,14 @@ class _Handler(socketserver.BaseRequestHandler):
             if "HEADER_GC_EXCHANGE" in self.server.profile.packets:
                 self.send("HEADER_GC_CHARACTER_ADD", dwVID=PC_VID, x=5100, y=5000, bType=6, wRaceNum=0)
                 self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=PC_VID, name="TESTR")
+            if self.player_packets:
+                self.send("HEADER_GC_CHARACTER_ADD", dwVID=SHOP_VID, x=4900, y=4900, bType=1, wRaceNum=9002)
+                self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=SHOP_VID, name="Silah Satıcısı")
+                self.send("HEADER_GC_CHARACTER_ADD", dwVID=SMITH_VID, x=4900, y=5100, bType=1, wRaceNum=20016)
+                self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=SMITH_VID, name="Demirci")
+                skills = [{"bMasterType": 0, "bLevel": 0, "tNextRead": 0} for _ in range(255)]
+                skills[3]["bLevel"] = 5
+                self.send("HEADER_GC_SKILL_LEVEL_NEW", skills=skills)
             self.send("HEADER_GC_PING")
         elif name == "HEADER_CG_PONG":
             with self.w.lock:
@@ -158,6 +177,8 @@ class _Handler(socketserver.BaseRequestHandler):
         elif name == "HEADER_CG_ATTACK":
             with self.w.lock:
                 self.w.stats["attacks"] += 1
+                if d.get("bType"):
+                    self.w.stats["skill_hits"] = self.w.stats.get("skill_hits", 0) + 1
             if d["dwVID"] == MOB_VID and self.hp > 0:
                 self.hp -= 1
                 if self.hp == 0:
@@ -166,7 +187,15 @@ class _Handler(socketserver.BaseRequestHandler):
                     self.point(3, 20)
         elif name == "HEADER_CG_ITEM_PICKUP" and d["vid"] == 400:
             self.send("HEADER_GC_ITEM_GROUND_DEL", vid=400)
+            self.me["items"][1] = [30000, 1]
             self.item(1, 30000, 1)
+        elif name == "HEADER_CG_ITEM_USE" and d["Cell"]["cell"] >= 90 and d["Cell"]["cell"] in self.me["items"]:
+            # giyili eşyaya sağ tık: çıkar (ilk boş envanter hücresine)
+            cell = d["Cell"]["cell"]
+            free = next(i for i in range(90) if i not in self.me["items"])
+            self.me["items"][free] = self.me["items"].pop(cell)
+            self.item(cell, 0, 0)
+            self.item(free, self.me["items"][free][0], 1)
         elif name == "HEADER_CG_ITEM_USE":
             cell = d["Cell"]["cell"]
             vnum, count = self.me["items"].get(cell, [0, 0])
@@ -186,6 +215,32 @@ class _Handler(socketserver.BaseRequestHandler):
                 self.pending = "finish"
             else:
                 self.script("Merhaba yolcu![ENTER]Ne istersin?[QUESTION 1;Görev ver|2;Hoşça kal][DONE]")
+        elif name == "HEADER_CG_ON_CLICK" and d["vid"] == SHOP_VID:
+            self.open_shop()
+        elif name == "HEADER_CG_SHOP":
+            self.on_shop(d["subheader"], trailing)
+        elif name == "HEADER_CG_GIVE_ITEM":
+            self.on_give_item(d)
+        elif name == "HEADER_CG_ITEM_USE_TO_ITEM":
+            src = self.me["items"].get(d["source_pos"]["cell"], [0, 0])
+            if src[0] == 25040:
+                self.refine_info(d["target_pos"]["cell"], 2)
+        elif name == "HEADER_CG_REFINE":
+            self.on_refine(d)
+        elif name == "HEADER_CG_USE_SKILL":
+            with self.w.lock:
+                self.w.stats.setdefault("skills_used", []).append((d["dwVnum"], d["dwTargetVID"]))
+        elif name == "HEADER_CG_ITEM_DROP2":
+            cell = d["pos"]["cell"]
+            vnum, count = self.me["items"].get(cell, [0, 0])
+            if vnum:
+                left = count - d["count"]
+                if left > 0:
+                    self.me["items"][cell] = [vnum, left]
+                else:
+                    self.me["items"].pop(cell)
+                self.item(cell, vnum if left > 0 else 0, max(left, 0))
+                self.send("HEADER_GC_ITEM_GROUND_ADD", x=self.me["x"], y=self.me["y"], z=0, dwVID=410, dwVnum=vnum)
         elif name == "HEADER_CG_EXCHANGE":
             self.on_exchange(d)
         elif name == "HEADER_CG_WHISPER":
@@ -290,7 +345,81 @@ def _handler_extras() -> None:
             self.trade = None
             ex(5, 0)
 
-    for fn in (script, mrq, on_quest_answer, on_exchange):
+    def shop_packet(self, sub: int, raw: bytes = b"") -> None:
+        self.c.send("HEADER_GC_SHOP", {"subheader": sub}, raw)
+
+    def open_shop(self) -> None:
+        prof = self.server.profile
+        items = [prof.encode("packet_shop_item", {"vnum": v, "price": p, "count": 1, "display_pos": i})
+                 for i, (v, p) in enumerate(SHOP_ITEMS)]
+        empty = prof.encode("packet_shop_item", {})
+        raw = SHOP_VID.to_bytes(4, "little") + b"".join(items) + empty * (40 - len(items))
+        self.shop_packet(0, raw)
+
+    def free_cell(self) -> int | None:
+        return next((i for i in range(90) if i not in self.me["items"]), None)
+
+    def on_shop(self, sub: int, raw: bytes) -> None:
+        if sub == 0:
+            self.shop_packet(1)
+        elif sub == 1:
+            pos = raw[1]
+            if pos >= len(SHOP_ITEMS):
+                return self.shop_packet(8)
+            vnum, price = SHOP_ITEMS[pos]
+            if self.me["gold"] < price:
+                return self.shop_packet(5)
+            cell = self.free_cell()
+            if cell is None:
+                return self.shop_packet(7)
+            self.me["gold"] -= price
+            self.point(11, self.me["gold"])
+            self.me["items"][cell] = [vnum, 1]
+            self.item(cell, vnum, 1)      # başarıda GC_SHOP yanıtı yok (gerçek sunucu gibi)
+        elif sub == 3:
+            cell, count = raw[0], raw[1]
+            vnum, have = self.me["items"].get(cell, [0, 0])
+            if vnum and 0 < count <= have:
+                left = have - count
+                if left:
+                    self.me["items"][cell] = [vnum, left]
+                else:
+                    self.me["items"].pop(cell)
+                self.item(cell, vnum if left else 0, left)
+                self.me["gold"] += 20 * count
+                self.point(11, self.me["gold"])
+
+    def refine_info(self, cell: int, rtype: int) -> None:
+        vnum = self.me["items"].get(cell, [0, 0])[0]
+        if vnum != 10:
+            return self.chat("Bu eşya yükseltilemez.")
+        self.refining = (cell, rtype)
+        mats = [{"vnum": 30000, "count": 1}] + [{}] * 4
+        self.send("HEADER_GC_REFINE_INFORMATION_NEW", type=rtype, pos=cell,
+                  refine_table={"src_vnum": 10, "result_vnum": 11, "material_count": 1, "cost": 300, "prob": 100,
+                                "materials": mats})
+
+    def on_give_item(self, d: dict) -> None:
+        if d["dwTargetVID"] == SMITH_VID:
+            self.refine_info(d["ItemPos"]["cell"], 0)
+
+    def on_refine(self, d: dict) -> None:
+        r, self.refining = self.refining, None
+        if d["type"] == 255 or r is None or r[0] != d["pos"]:
+            return
+        mat = next((c for c, (v, _) in self.me["items"].items() if v == 30000), None)
+        if self.me["gold"] < 300 or mat is None:
+            return self.chat("Yükseltme için gerekenler eksik.")
+        self.me["gold"] -= 300
+        self.point(11, self.me["gold"])
+        self.me["items"].pop(mat)
+        self.item(mat, 0, 0)
+        self.me["items"][d["pos"]] = [11, 1]
+        self.item(d["pos"], 11, 1)
+        self.chat("RefineSuceeded", ctype=5)
+
+    for fn in (script, mrq, on_quest_answer, on_exchange, shop_packet, open_shop, free_cell, on_shop, refine_info,
+               on_give_item, on_refine):
         setattr(_Handler, fn.__name__, fn)
 
 

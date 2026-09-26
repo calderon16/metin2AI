@@ -48,6 +48,17 @@ DEFAULT_BINDINGS: dict[str, Any] = {
     "exchange_subheaders": {"CG_START": 0, "CG_ITEM_ADD": 1, "CG_ITEM_DEL": 2, "CG_ELK_ADD": 3, "CG_ACCEPT": 4,
                             "CG_CANCEL": 5, "GC_START": 0, "GC_ITEM_ADD": 1, "GC_ITEM_DEL": 2, "GC_ELK_ADD": 3,
                             "GC_ACCEPT": 4, "GC_END": 5, "GC_ALREADY": 6, "GC_LESS_ELK": 7},
+    # NPC dükkânı (shop.cpp / input_main.cpp Shop): BUY'dan sonra [adet, dükkân sırası], SELL2'den sonra
+    # [envanter hücresi, adet] baytları gelir. GC_START'tan sonra DWORD owner_vid + 40 packet_shop_item.
+    "shop_subheaders": {"CG_END": 0, "CG_BUY": 1, "CG_SELL": 2, "CG_SELL2": 3,
+                        "GC_START": 0, "GC_END": 1, "GC_UPDATE_ITEM": 2, "GC_UPDATE_PRICE": 3, "GC_OK": 4,
+                        "GC_NOT_ENOUGH_MONEY": 5, "GC_SOLDOUT": 6, "GC_INVENTORY_FULL": 7, "GC_INVALID_POS": 8},
+    "shop_item_struct": "packet_shop_item",
+    "shop_max_items": 40,
+    # Yükseltme (refine.h / char_item.cpp ReceiveItem): eşya bu NPC'lere verilince yükseltme penceresi açılır
+    "blacksmith_vnums": [20016, 20091, 20044, 20045, 20046, 20074, 20075, 20076],
+    # REFINE_TYPE_*: NORMAL 0, SCROLL 2, HYUNIRON 3, MONEY_ONLY 4, MUSIN 5, BDRAGON 6; 255 = vazgeç
+    "refine_cancel_type": 255,
     # Boyutu `size` alanından değil bayrak bitlerinden çıkan paketler. Klasik kaynakta questpc.cpp
     # SendQuestInfoPacket `qi.size`'ı paketi tampona yazdıktan sonra artırır; giden size hep 6 kalır ve
     # istemci ek alanları flag'e göre okur. {header: {flag_offset, base, fields: {bit: bayt}}}
@@ -112,6 +123,18 @@ DEFAULT_BINDINGS: dict[str, Any] = {
         "item_pickup": {"cg": ["HEADER_CG_ITEM_PICKUP"], "vid": ["vid", "dwVID"]},
         "on_click": {"cg": ["HEADER_CG_ON_CLICK"], "vid": ["vid", "dwVID"]},
         "script_answer": {"cg": ["HEADER_CG_SCRIPT_ANSWER"], "answer": ["answer"]},
+        "shop": {"cg": ["HEADER_CG_SHOP"], "gc": ["HEADER_GC_SHOP"], "sub": ["subheader"]},
+        "give_item": {"cg": ["HEADER_CG_GIVE_ITEM"], "vid": ["dwTargetVID"], "pos": ["ItemPos"],
+                      "count": ["byItemCount"]},
+        # Sunucu (char_item.cpp RefineInformation) type alanlı yeni sürümü (119) gönderir
+        "refine_info": {"gc": ["HEADER_GC_REFINE_INFORMATION_NEW", "HEADER_GC_REFINE_INFORMATION"],
+                        "pos": ["pos"], "type": ["type"], "table": ["refine_table"]},
+        "refine": {"cg": ["HEADER_CG_REFINE"], "pos": ["pos"], "type": ["type"]},
+        "item_use_to_item": {"cg": ["HEADER_CG_ITEM_USE_TO_ITEM"], "source": ["source_pos"],
+                             "target": ["target_pos"]},
+        "use_skill": {"cg": ["HEADER_CG_USE_SKILL"], "vnum": ["dwVnum"], "vid": ["dwTargetVID"]},
+        "skill_levels": {"gc": ["HEADER_GC_SKILL_LEVEL_NEW"], "skills": ["skills"]},
+        "item_drop": {"cg": ["HEADER_CG_ITEM_DROP2"], "pos": ["pos"], "gold": ["gold"], "count": ["count"]},
         "exchange": {"cg": ["HEADER_CG_EXCHANGE"], "gc": ["HEADER_GC_EXCHANGE"], "sub": ["subheader", "sub_header"],
                      "is_me": ["is_me"], "arg1": ["arg1"], "arg2": ["arg2"], "arg3": ["arg3"], "pos": ["Pos", "pos"]},
     },

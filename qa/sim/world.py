@@ -50,7 +50,10 @@ FAULTS: dict[str, str] = {
 }
 
 ITEMS: dict[int, dict[str, Any]] = {
-    10: {"name": "Kılıç", "type": "weapon", "wear": "weapon", "price": 100, "stack": False, "attack": 15},
+    10: {"name": "Kılıç", "type": "weapon", "wear": "weapon", "price": 100, "stack": False, "attack": 15,
+         "refine": {"to": 11, "cost": 300, "prob": 100, "materials": [{"vnum": 30000, "count": 2}]}},
+    11: {"name": "Kılıç+1", "type": "weapon", "wear": "weapon", "price": 150, "stack": False, "attack": 18},
+    25040: {"name": "Kutsama Kâğıdı", "type": "refine_scroll", "price": 1000, "stack": True},
     11200: {"name": "Tahta Zırh", "type": "armor", "wear": "body", "price": 200, "stack": False, "defense": 10},
     27001: {"name": "Kırmızı İksir (K)", "type": "potion", "price": 50, "stack": True, "heal": 50},
     30000: {"name": "Köpek Dişi", "type": "material", "price": 5, "stack": True},
@@ -63,7 +66,7 @@ MOBS: dict[int, dict[str, Any]] = {
 
 NPCS: dict[int, dict[str, Any]] = {
     9001: {"name": "Genel Mağaza Satıcısı", "shop": [27001, 10, 11200]},
-    20016: {"name": "Köy Muhafızı", "quest": "dog_hunt"},
+    20016: {"name": "Köy Muhafızı", "quest": "dog_hunt", "refine": True},   # gerçekte 20016 demircidir
 }
 
 DOG_HUNT_GOAL = 5
@@ -935,6 +938,54 @@ class SimClient:
         e = self.world._spawn("item", s["vnum"], p.x + 50, p.y + 50, count=n)
         self.world.server_event("event", "ITEM_DROP_BY_PLAYER", p, vnum=s["vnum"], count=n)
         return {"vid": e.vid}
+
+    def cmd_refine_item(self, slot: int, npc_vid: int | None = None, scroll_slot: int | None = None,
+                        confirm: bool = True) -> dict[str, Any]:
+        p = self._need_free()
+        s = self._slot(p, slot)
+        rec = ITEMS[s["vnum"]].get("refine")
+        if scroll_slot is not None:
+            sc = self._slot(p, scroll_slot)
+            if ITEMS[sc["vnum"]]["type"] != "refine_scroll":
+                raise SimError("CANNOT_USE", "Bu bir yükseltme kâğıdı değil")
+        else:
+            if npc_vid is None:
+                raise SimError("BAD_ARGS", "npc_vid ya da scroll_slot gerekli")
+            e = self._entity(npc_vid)
+            if e.type != "npc" or not NPCS[e.vnum].get("refine"):
+                raise SimError("REFINE_REFUSED", "Bu NPC yükseltme yapmaz")
+            self._in_range(p, e, INTERACT_RANGE)
+        if rec is None:
+            self.push_message("Bu eşya yükseltilemez.")
+            raise SimError("REFINE_REFUSED", "Yükseltme penceresi açılmadı: bu eşya yükseltilemez")
+        info = {"src_vnum": s["vnum"], "result_vnum": rec["to"], "cost": rec["cost"], "prob": rec["prob"],
+                "type": 2 if scroll_slot is not None else 0, "materials": [dict(m) for m in rec["materials"]]}
+        if not confirm:
+            return {"confirmed": False, **info}
+        have = lambda v: sum(x["count"] for x in p.inventory if x and x["vnum"] == v)  # noqa: E731
+        lacking = [m for m in rec["materials"] if have(m["vnum"]) < m["count"]]
+        if lacking:
+            raise SimError("MISSING_MATERIALS", f"Eksik malzeme: {lacking}")
+        if p.gold < rec["cost"]:
+            raise SimError("NOT_ENOUGH_GOLD", f"Yükseltme ücreti {rec['cost']} yang, sende {p.gold}")
+        for m in rec["materials"]:
+            left = m["count"]
+            for i, x in enumerate(p.inventory):
+                if left and x and x["vnum"] == m["vnum"]:
+                    take = min(left, x["count"])
+                    x["count"] -= take
+                    left -= take
+                    if x["count"] == 0:
+                        p.inventory[i] = None
+        if scroll_slot is not None:
+            sc = p.inventory[scroll_slot]
+            sc["count"] -= 1
+            if sc["count"] == 0:
+                p.inventory[scroll_slot] = None
+        p.gold -= rec["cost"]
+        s["vnum"] = rec["to"]
+        self.world.server_event("event", "REFINE", p, vnum=info["src_vnum"], result=rec["to"], cost=rec["cost"])
+        return {"confirmed": True, "result": "success", **info, "slot_vnum": rec["to"], "gold": p.gold}
 
     # ------------------------------------------------------------ NPC / shop / dialog
     def cmd_talk_to_npc(self, vid: int) -> dict[str, Any]:

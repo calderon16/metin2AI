@@ -260,7 +260,7 @@ def kill_until_drop(ctx: GameContext, vnum: int, item_vnum: int, max_kills: int 
 
 @behaviour("use_skill")
 def use_skill(ctx: GameContext, slot: int) -> dict[str, Any]:
-    """Seçili hedefe skill kullan."""
+    """Seçili hedefe beceri kullan (headless: slot = beceri vnum'u, get_player_state.skills)."""
     r = ctx.act("use_skill", slot=slot)
     ctx.react()
     return r
@@ -345,6 +345,68 @@ def drop_item(ctx: GameContext, vnum: int | None = None, slot: int | None = None
     r = ctx.act("drop_item", **args)
     ctx.react()
     return r
+
+
+# Demirciler (refine.h): eşya bunlara verilince yükseltme penceresi açılır
+BLACKSMITH_VNUMS = [20016, 20091, 20044, 20045, 20046]
+
+
+@behaviour("refine_item")
+def refine_item(ctx: GameContext, vnum: int | None = None, slot: int | None = None, npc_vnum: int | None = None,
+                scroll_vnum: int | None = None, confirm: bool = True) -> dict[str, Any]:
+    """Eşyayı + bas (yükselt). Kâğıt verilmezse en yakın demirciye yürür ve eşyayı ona verir; sunucunun
+    gösterdiği ücret/şans/malzeme ile onaylar. confirm=false yalnız yükseltme bilgisini gösterir."""
+    args: dict[str, Any] = {"slot": _resolve_slot(ctx, vnum, slot), "confirm": confirm}
+    if scroll_vnum is not None:
+        args["scroll_slot"] = _resolve_slot(ctx, scroll_vnum, None)
+    else:
+        found = None
+        for v in [npc_vnum] if npc_vnum is not None else BLACKSMITH_VNUMS:
+            found = _find(ctx, "npc", v, None, 15000)
+            if found is not None:
+                break
+        if found is None:
+            raise BehaviourError("NO_BLACKSMITH", "Yakında demirci yok (köydeki demirciye git)")
+        e = move_to_entity(ctx, vid=found["vid"], type="npc", range=APPROACH_RANGE)
+        args["npc_vid"] = e["vid"]
+    r = ctx.act("refine_item", **args)
+    if r.get("pending") and not r.get("confirmed"):
+        # Gerçek istemci: pencere sunucudan gelince aynı komut onaylar
+        start = ctx.now()
+        while "refine" not in ctx.windows():
+            if ctx.now() - start > 3000:
+                raise BehaviourError("REFINE_REFUSED", "Yükseltme penceresi açılmadı",
+                                     messages=[m["text"] for m in ctx.query("get_system_messages")[-3:]])
+            ctx.wait(250)
+        mark = len(ctx.events)
+        r = ctx.act("refine_item", **args)
+        while r.get("pending") and ctx.now() - start < 8000:
+            got = ctx.events_since(mark, "refine_result")
+            if got:
+                r = {**r, "pending": False, "result": got[-1]["data"].get("result")}
+                break
+            ctx.wait(250)
+    ctx.react()
+    return r
+
+
+@behaviour("skill_up")
+def skill_up(ctx: GameContext, vnum: int) -> dict[str, Any]:
+    """Beceri puanını bir beceriye ver (istemcideki beceri penceresi '+' düğmesi: /skillup)."""
+    ctx.act("send_chat", message=f"/skillup {int(vnum)}")
+    ctx.react()
+    return {"skill": int(vnum)}
+
+
+@behaviour("stat_up")
+def stat_up(ctx: GameContext, stat: str, times: int = 1) -> dict[str, Any]:
+    """Durum puanı ver: st (güç), ht (canlılık), dx (çeviklik), iq (zekâ) — karakter penceresi '+' düğmesi."""
+    if stat not in ("st", "ht", "dx", "iq"):
+        raise BehaviourError("BAD_ARGS", "stat: st | ht | dx | iq")
+    for _ in range(max(1, int(times))):
+        ctx.act("send_chat", message=f"/stat {stat}")
+        ctx.react()
+    return {"stat": stat, "times": times}
 
 
 # ------------------------------------------------------------------ NPC / UI
