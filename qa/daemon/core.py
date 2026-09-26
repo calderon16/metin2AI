@@ -52,6 +52,32 @@ class Daemon:
         except ValueError:
             pass
 
+    def owner_command_pending(self, account: str) -> bool:
+        return any(j["type"] == "owner_command" and (j.get("params") or {}).get("account") == account
+                   for j in self.db.list_jobs("queued", 200))
+
+    def tick_player_mode(self) -> list[int]:
+        """Oyuncu modu: boştaki (online) her ajana, kuyrukta başka iş yoksa bir oyun oturumu ver."""
+        dc = self.cfg.daemon
+        if not dc.player_mode or not self.llm_available():
+            return []
+        jobs = self.db.list_jobs("queued,running", 200)
+        if any(j["status"] == "queued" and j["type"] != "play_session" for j in jobs):
+            return []          # önce sıradaki işler (komutlar, testler) ajan alsın
+        playing = {(j.get("params") or {}).get("account") for j in jobs if j["type"] == "play_session"}
+        wanted = set(dc.player_accounts)
+        created = []
+        for a in self.agents.list():
+            acc = a["account"]
+            if a["status"] != "online" or acc in playing or (wanted and acc not in wanted):
+                continue
+            try:
+                created.append(self.jobs.submit("play_session", {"account": acc}, source="player_mode",
+                                                priority=-5))
+            except ValueError:
+                break
+        return created
+
     def llm_available(self) -> bool:
         if self._llm_factory is not None:
             return True

@@ -317,3 +317,61 @@ def test_daemon_turns_owner_whisper_into_a_job(server, prof, cfg, tmp_path):
         assert server.world.whispers_to_owner.count("Tamam, hallediyorum.") == 2
     finally:
         d.shutdown()
+
+
+def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cfg, tmp_path):
+    """Oyuncu modu: /qa reset ve qa_setup yok; sahip fısıldayınca oturum kesilir, komut hemen yürür."""
+    from qa.daemon.core import Daemon
+    from qa.planner.llm import ScriptedProvider, ToolCall
+
+    ppath = tmp_path / "fx.json"
+    prof.save(ppath)
+    cfg.bridge.mode = "headless"
+    cfg.headless = _hcfg(server, profile=str(ppath))
+    cfg.daemon.agents = [{"account": "AI_QA_001"}]
+    cfg.daemon.owners = ["TESTR"]
+    cfg.daemon.player_mode = True
+    cfg.daemon.player_session_steps = 200
+    cfg.daemon.snapshot_interval_s = 0.2
+    seen: list[tuple[str, set[str]]] = []
+
+    class Rec(ScriptedProvider):
+        def chat(self, system, messages, tools):
+            seen.append((system, {t.name for t in tools}))
+            return super().chat(system, messages, tools)
+
+    def make():
+        n = {"i": 0}
+
+        def script(messages):
+            i = n["i"]
+            n["i"] += 1
+            if "fısıltıyla" in (messages[0].text or ""):
+                return [ToolCall("whisper", {"to": "TESTR", "message": "Tamam"}, "o0")] if i == 0 else \
+                    [ToolCall("finish", {"summary": "komut bitti"}, "o1")]
+            return [ToolCall("wait", {"ms": 300}, f"p{i}")]
+        return Rec(script)
+
+    d = Daemon(cfg, llm_factory=make)
+    d.start()
+    try:
+        assert d.agents.wait_online(1, 15)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not any(j["type"] == "play_session" and j["status"] == "running"
+                                                      for j in d.db.list_jobs(None, 20)):
+            time.sleep(0.2)
+        time.sleep(1.5)
+        assert server.owner_whisper("buraya gel") == 1
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and "Tamam" not in server.world.whispers_to_owner:
+            time.sleep(0.2)
+        assert "Tamam" in server.world.whispers_to_owner
+        jobs = d.db.list_jobs(None, 20)
+        play = next(j for j in jobs if j["type"] == "play_session" and j["status"] != "running")
+        assert play["result"]["stop_reason"] == "preempted"
+        assert any(j["type"] == "owner_command" for j in jobs)
+        assert not [c for c in server.world.stats.get("qa_commands", []) if "reset" in c or "warp" in c]
+        assert seen and all("qa_setup" not in tools for _, tools in seen)
+        assert any("normal bir oyuncusun" in s for s, _ in seen)
+    finally:
+        d.shutdown()

@@ -258,6 +258,8 @@ class _Handler(socketserver.BaseRequestHandler):
             parts = msg.split()
             if parts[:1] == ["/qa"] and self.name.startswith("AI_QA_"):
                 cmd = parts[1] if len(parts) > 1 else ""
+                with self.w.lock:
+                    self.w.stats.setdefault("qa_commands", []).append(msg)
                 if cmd == "gold":
                     self.me["gold"] = int(parts[2])
                     self.point(11, self.me["gold"])

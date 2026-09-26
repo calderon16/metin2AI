@@ -115,13 +115,15 @@ class ExplorationManager:
         return s
 
     def start(self, goal: str, account: str | None = None, seed: int | None = None,
-              setup: list[Any] | None = None, faults: list[str] | None = None) -> dict[str, Any]:
+              setup: list[Any] | None = None, faults: list[str] | None = None,
+              reset: bool = True) -> dict[str, Any]:
+        """reset=False (oyuncu modu): /qa reset gönderilmez; karakter olduğu yerden devam eder."""
         ops = [SetupOp.parse(x) for x in setup or []]
         rs = RunSession(self.cfg, self.store, self.factory, scenario="explore", mode="explore", seed=seed,
                         account=account, faults=faults)
         try:
             rs.start()
-            rs.setup(ops)
+            rs.setup(ops, reset=reset)
         except Exception as e:  # login/setup/bridge — hepsi keşfi başlatamaz
             rs.fail_infra(f"Keşif başlatılamadı: {e}")
             rep = rs.finish({"goal": goal})

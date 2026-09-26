@@ -64,6 +64,26 @@ Kurallar:
 - Her turda en az bir tool çağır; birden fazla bağımsız çağrı yapabilirsin."""
 
 
+PLAYER_SYSTEM_PROMPT = """Sen Metin2 oynayan normal bir oyuncusun (karakterin {account}); oynarken oyunu da test
+ediyorsun. Türkçe düşün.
+
+Kurallar:
+- Her şeyi gerçek bir oyuncu gibi yap. Bir yere gitmek için YÜRÜ (walk_to, move_to_entity, go_to_quest_npc,
+  talk_npc). Işınlanma, /qa komutu ya da hile yok; bunlar zaten engellidir.
+- Ticaret yalnız GM'lerle (ör. TESTR) yapılabilir; başka oyuncuyla ticaret açma.
+- Oyuncunun yaptığı her şeyi yap: görev al ve bitir (observe → quests: available/active/ready), canavar kes,
+  düşenleri topla (pickup), daha iyi ekipmanı giy (equip_item), iksir iç (use_item), satıcıdan al/sat
+  (talk_npc → buy_item/sell_item), demircide + bas (refine_item; önce confirm=false ile ücret ve şansa bak),
+  seviye atlayınca durum puanı (stat_up) ve beceri puanı (skill_up) ver, becerileri kullan (use_skill).
+- Öncelik: 1) HP düşükse iksir iç ya da uzaklaş 2) biten (ready) görevi teslim et 3) aktif görevin hedefi
+  4) yeni görev al 5) seviyene uygun canavar kes 6) envanter dolunca sat; yang birikince ekipman al / + bas.
+- Oyunun yanlış davrandığını görürsen (yanlış ödül, kaybolan eşya, sunucu hatası) report_finding ile kanıtıyla
+  kaydet. Kendi hatalı çağrın bulgu değildir.
+- Bu oturumda en çok {max_steps} adımın var. Bitirirken `finish` ile ne yaptığını ve SIRADAKİ planını yaz;
+  bir sonraki oturum oradan devam eder.
+- Her turda en az bir tool çağır; birden fazla bağımsız çağrı yapabilirsin."""
+
+
 def _param_schema(annotation: Any) -> dict[str, Any] | None:
     a = str(annotation).replace(" ", "")
     if a.startswith("dict") or "dict[" in a:
@@ -139,7 +159,8 @@ def _prune(d: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mini_state(st: dict[str, Any]) -> dict[str, Any]:
-    return _prune({k: st.get(k) for k in ("hp", "max_hp", "gold", "level", "x", "y", "dead")})
+    return _prune({k: st.get(k) for k in ("hp", "max_hp", "sp", "gold", "level", "exp", "x", "y", "map", "dead",
+                                          "skills")})
 
 
 def _events_view(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -166,7 +187,9 @@ def _observe_view(o: dict[str, Any]) -> dict[str, Any]:
         "inventory": [f"{i['vnum']}x{i['count']}@{i['slot']}" for i in inv.get("items", [])],
         "equipment": {k: v["vnum"] for k, v in (inv.get("equipment") or {}).items()},
         "quests": o.get("quests"),
-        "windows": {k: _prune({"options": w.get("options"), "items": [i["vnum"] for i in w.get("items", [])]})
+        "windows": {k: _prune({"options": w.get("options"),
+                               "items": [f"{i['vnum']}:{i.get('price', '')}@{i['slot']}" for i in w.get("items", [])],
+                               **{f: w.get(f) for f in ("src_vnum", "result_vnum", "cost", "prob", "materials")}})
                     for k, w in (o.get("windows") or {}).items()},
         "nearby[vid,tür,vnum,ad,mesafe]": _entities_view(o.get("nearby") or []),
         "messages": [m["text"] for m in (o.get("messages") or [])[-5:]],
@@ -234,11 +257,15 @@ class AutoExplorer:
 
     def run(self, goal: str, *, budget: ExploreBudget | None = None, account: str | None = None,
             seed: int | None = None, setup: list[Any] | None = None, save_as_scenario: str | None = None,
-            validate: bool = True) -> ExploreOutcome:
+            validate: bool = True, player: bool = False, should_stop: Any = None) -> ExploreOutcome:
+        """player=True: oyuncu modu — /qa reset ve qa_setup yok (karakter olduğu yerden devam eder), oyuncu
+        sistem istemi. should_stop(): her turdan önce sorulur; True ise oturum 'preempted' ile biter."""
         b = budget or ExploreBudget()
         max_turns = b.max_turns or b.max_steps * 2 + 10
         self.budget.check()  # bütçe dolmuşsa oyuna hiç girme
-        start = self.explorer.start(goal, account, seed, setup)
+        if player and setup:
+            raise ValueError("Oyuncu modunda hazırlık (setup) kullanılamaz")
+        start = self.explorer.start(goal, account, seed, setup, reset=not player)
         if not start["ok"]:
             return ExploreOutcome(start["run_id"], "ERROR", start["error"], "start_failed")
         run_id = start["run_id"]
@@ -247,11 +274,18 @@ class AutoExplorer:
         transcript = rs.artifacts.path("llm_transcript.jsonl").open("w", encoding="utf-8")
 
         tools = behaviour_tools() + meta_tools()
+        if player:
+            tools = [t for t in tools if t.name != "qa_setup"]
         tool_names = {t.name for t in tools}
-        system = SYSTEM_PROMPT.format(max_steps=b.max_steps)
+        if player:
+            system = PLAYER_SYSTEM_PROMPT.format(max_steps=b.max_steps, account=start.get("account") or account)
+            intro = f"HEDEF:\n{goal}\n"
+        else:
+            system = SYSTEM_PROMPT.format(max_steps=b.max_steps)
+            intro = (f"TEST HEDEFİ:\n{goal}\n\nFikir listesi (edge-case'ler):\n"
+                     + yaml.safe_dump(suggest_checklist(goal), allow_unicode=True, sort_keys=False))
         first = Message("user", text=(
-            f"TEST HEDEFİ:\n{goal}\n\nFikir listesi (edge-case'ler):\n"
-            + yaml.safe_dump(suggest_checklist(goal), allow_unicode=True, sort_keys=False)
+            intro
             + "\nBaşlangıç durumu:\n"
             + json.dumps(_observe_view({"state": start["state"], "inventory": start["inventory"],
                                         "nearby": start["nearby"]}), ensure_ascii=False)
@@ -270,6 +304,9 @@ class AutoExplorer:
 
         try:
             while turns < max_turns:
+                if should_stop is not None and should_stop():
+                    stop_reason = "preempted"
+                    break
                 turns += 1
                 try:
                     reply = self.provider.chat(system, history, tools)

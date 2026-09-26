@@ -89,7 +89,7 @@ class Scheduler:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if not self.schedules:
+        if not self.schedules and not self.daemon.cfg.daemon.player_mode:
             return
         self._thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
         self._thread.start()
@@ -133,6 +133,10 @@ class Scheduler:
         while not self._stop.is_set():
             try:
                 self.tick()
+            except Exception:
+                pass
+            try:
+                self.daemon.tick_player_mode()
             except Exception:
                 pass
             self._stop.wait(15)

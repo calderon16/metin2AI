@@ -33,6 +33,8 @@ JOB_TYPES = {
     "replay": "Run'ı tekrar oynat. params: run_id, times?",
     "confirm": "Bulguyu replay ile doğrula. params: finding_id, times?",
     "explore_rotation": "Eğitim verisi için sıradaki keşif hedefi (training/collect_goals.yaml). params: goals?",
+    "play_session": "Oyuncu modu oturumu: normal oyuncu gibi oyna (görev, kasılma, ekipman, + basma). "
+                    "params: account",
     "owner_command": "Sahibin (daemon.owners) fısıltıyla verdiği iş. params: account, sender, text",
     "learning_cycle": "Veri → eğitim (Kaggle/incoming) → Ollama → değerlendirme → daha iyiyse devreye alma. "
                       "params: base_ollama?, base_unsloth?, min_samples?, gguf?",
@@ -96,16 +98,19 @@ class JobContext:
 
     def explore(self, goal: str, max_steps: int | None = None, save_as: str | None = None,
                 setup: list[Any] | None = None, seed: int | None = None, system: str | None = None,
-                provider: Any = None, account: str | None = None) -> dict[str, Any]:
+                provider: Any = None, account: str | None = None, player: bool = False,
+                should_stop: Any = None) -> dict[str, Any]:
+        """player=True: oyuncu modu (reset/qa_setup/ışınlanma yok). should_stop(ajan) her turdan önce sorulur."""
         d = self.daemon
         provider = provider or d.make_llm_provider()
         e = d.cfg.explorer
         budget = ExploreBudget(max_steps=max_steps or e.max_steps, max_total_tokens=e.max_total_tokens,
                                history_turns=e.history_turns)
         with self._lease(1, [account] if account else None) as (agents, factory), d.agents.world_guard():
+            stop = (lambda: bool(self.cancelled() or should_stop(agents[0]))) if should_stop else self.cancelled
             out = AutoExplorer(d.cfg, d.store, provider, factory).run(
                 goal, budget=budget, account=agents[0].account, seed=seed, setup=setup,
-                save_as_scenario=save_as, validate=False).to_dict()
+                save_as_scenario=save_as, validate=False, player=player, should_stop=stop).to_dict()
             self._record(out["run_id"], agents)
             from ..scenario.runner import load_run_report
 
@@ -176,6 +181,8 @@ def execute(ctx: JobContext, job_type: str) -> dict[str, Any]:
         return _learning_cycle(ctx, p)
     if job_type == "owner_command":
         return _owner_command(ctx, p)
+    if job_type == "play_session":
+        return _play_session(ctx, p)
     raise ValueError(f"Bilinmeyen iş tipi: {job_type}")
 
 
@@ -204,7 +211,7 @@ OWNER_GOAL = """Sahibin {sender} sana (oyundaki karakterin {account}) fısıltı
 
 Normal bir Metin2 oyuncusu gibi davran:
 1. Önce whisper ile {sender}'e kısa bir Türkçe onay yaz (ör. "Tamam, hallediyorum.").
-2. İstenen işi oyun içinde normal oyuncu eylemleriyle yap (yürü, konuş, kes, topla, giy...). qa_setup KULLANMA.
+2. İstenen işi oyun içinde normal oyuncu eylemleriyle yap (yürü, konuş, kes, topla, giy, al/sat, + bas...).
 3. İstek bir soruysa (ör. "neredesin", "seviyen kaç") observe ile bak ve whisper ile cevap ver.
 4. Yapamıyorsan ya da istek tehlikeliyse (ticaret, eşya atma) nedenini whisper ile açıkla.
 5. Bitince whisper ile sonucu bildir, sonra finish çağır."""
@@ -215,8 +222,43 @@ def _owner_command(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
     d = ctx.daemon
     goal = OWNER_GOAL.format(sender=p["sender"], account=p["account"], text=str(p["text"])[:400])
     ctx.progress(account=p["account"], text=str(p["text"])[:80])
-    out = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=p["account"])
+    out = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=p["account"], player=True)
     return {"account": p["account"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
+
+
+PLAY_GOAL = """Oyunu normal bir oyuncu gibi oynamaya devam et: görevleri al ve bitir, seviye atla, daha iyi
+ekipman edin ve giy, + bas. Karşılaştığın hataları kaydet.
+{memory}"""
+
+
+def _player_memory_path(ctx: "JobContext") -> Path:
+    return Path(ctx.daemon.cfg.resolve("artifacts")) / "daemon" / "player_memory.json"
+
+
+def _play_session(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
+    """Oyuncu modu: tek ajanla (only=[hesap]) oyuncu istemli LLM oturumu. Bir önceki oturumun özeti (plan)
+    hedefe eklenir; sahip fısıldarsa oturum hemen kesilir ki komut beklemesin."""
+    d, acc = ctx.daemon, p["account"]
+    path = _player_memory_path(ctx)
+    try:
+        memory = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        memory = {}
+    last = (memory.get(acc) or {}).get("summary")
+    goal = PLAY_GOAL.format(memory=f"Önceki oturumun özeti ve planın:\n{last}" if last else "")
+    ctx.progress(account=acc)
+
+    def owner_waiting(agent: Any) -> bool:
+        return d.agents.poll_whispers(agent, agent.bridge) > 0 or d.owner_command_pending(acc)
+
+    out = ctx.explore(goal, d.cfg.daemon.player_session_steps, None, None, account=acc, player=True,
+                      should_stop=owner_waiting)
+    summary = (out.get("agent_summary") or "").strip()
+    if summary:
+        memory[acc] = {"summary": summary[:1500], "run_id": out.get("run_id")}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(memory, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"account": acc, **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
 
 
 def _learning_cycle(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
@@ -254,18 +296,20 @@ class JobManager:
     def validate(self, job_type: str, params: dict[str, Any]) -> None:
         if job_type not in JOB_TYPES:
             raise ValueError(f"Bilinmeyen iş tipi: {job_type} (mevcut: {sorted(JOB_TYPES)})")
-        need = {"scenario": ["name"], "explore": ["goal"], "replay": ["run_id"], "confirm": ["finding_id"]}
+        need = {"scenario": ["name"], "explore": ["goal"], "replay": ["run_id"], "confirm": ["finding_id"],
+                "play_session": ["account"], "owner_command": ["account", "text"]}
         missing = [k for k in need.get(job_type, []) if not params.get(k)]
         if missing:
             raise ValueError(f"{job_type} için eksik parametre: {missing}")
         if job_type == "scenario":
             load_scenario(self.daemon.cfg.scenarios_path, params["name"])  # yoksa hata
-        if job_type == "explore" and not self.daemon.llm_available():
+        llm_job = job_type in ("explore", "play_session")
+        if llm_job and not self.daemon.llm_available():
             e = self.daemon.cfg.explorer
             if e.provider == "ollama":
                 raise ValueError(f"Ollama'ya ulaşılamıyor ({e.ollama_url}); Ollama'yı başlatın")
             raise ValueError(f"LLM anahtarı yok: {e.api_key_env} ortam değişkenini ayarlayın")
-        if job_type == "explore":
+        if llm_job:
             blocked = self.daemon.llm_budget().blocked_reason()
             if blocked:
                 raise ValueError(f"{blocked} — keşif yarın (ya da tavan yükseltilince) çalıştırılabilir")

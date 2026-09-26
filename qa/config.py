@@ -139,6 +139,11 @@ class DaemonConfig:
     # Ajanlara fısıltıyla iş verebilen oyuncular (ör. ["TESTR"]). Başkalarının fısıltıları yok sayılır.
     owners: list[str] = field(default_factory=list)
     owner_command_steps: int = 30
+    # Oyuncu modu: boştaki ajanlar sürekli normal oyuncu gibi oynar (görev, kasılma, ekipman, + basma) —
+    # /qa reset, qa_setup ve ışınlanma yok. Sahip fısıldayınca oturum kesilir, komut önce yapılır.
+    player_mode: bool = False
+    player_accounts: list[str] = field(default_factory=list)   # boş = tüm ajanlar
+    player_session_steps: int = 40
     # [{account, character?, keep_online?, tags?}]
     agents: list[dict[str, Any]] = field(default_factory=_default_daemon_agents)
     # [{name, job: {type, ...}, every?: "1h", daily?: "03:00", continuous?: true, enabled?: true}]

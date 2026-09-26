@@ -199,19 +199,28 @@ class AgentManager:
                 a.bridge.close()
         a.bridge = None
 
-    def _refresh(self, a: AgentState) -> None:
-        with self.world_guard():
-            st = a.bridge.call("get_player_state")
-            whispers = []
-            if self.dcfg.owners:
-                with contextlib.suppress(Exception):   # eski köprüler get_whispers bilmeyebilir
-                    whispers = a.bridge.call("get_whispers", since=a.whisper_seq)
-            a.bridge.drain_events()
+    def poll_whispers(self, a: AgentState, bridge: Any = None) -> int:
+        """Sahip fısıltılarını oku ve iş olarak bildir; bildirilen sahip fısıltısı sayısını döndür. Kiralanmış
+        (busy) ajanda işi yürüten thread kendi köprüsüyle çağırır (oyuncu modu oturumu kesmek için)."""
+        if not self.dcfg.owners:
+            return 0
+        whispers = []
+        with contextlib.suppress(Exception):   # eski köprüler get_whispers bilmeyebilir
+            whispers = (bridge or a.bridge).call("get_whispers", since=a.whisper_seq)
         owners = {o.lower() for o in self.dcfg.owners}
+        n = 0
         for w in whispers:
             a.whisper_seq = max(a.whisper_seq, int(w.get("seq", 0)))
             if str(w.get("from", "")).lower() in owners and self.on_owner_whisper is not None:
                 self.on_owner_whisper(a.account, w["from"], w.get("text", ""))
+                n += 1
+        return n
+
+    def _refresh(self, a: AgentState) -> None:
+        with self.world_guard():
+            st = a.bridge.call("get_player_state")
+            self.poll_whispers(a)
+            a.bridge.drain_events()
         a.snapshot = {k: st.get(k) for k in ("name", "level", "hp", "max_hp", "gold", "map", "x", "y", "channel",
                                               "dead", "in_game")}
         a.snapshot["updated_at"] = utcnow()
