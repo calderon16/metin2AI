@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,8 +69,11 @@ PLAYER_SYSTEM_PROMPT = """Sen Metin2 oynayan normal bir oyuncusun (karakterin {a
 ediyorsun. Türkçe düşün.
 
 Kurallar:
-- Her şeyi gerçek bir oyuncu gibi yap. Bir yere gitmek için YÜRÜ (walk_to, move_to_entity, go_to_quest_npc,
-  talk_npc). Işınlanma, /qa komutu ya da hile yok; bunlar zaten engellidir.
+- Her şeyi gerçek bir oyuncu gibi yap. Bir yere gitmek için YÜRÜ (walk_to, go_to_npc, go_to_quest_npc,
+  talk_npc). Uzaktaki bir NPC'ye (Silah Satıcısı, Demirci ...) adıyla go_to_npc ile git. Işınlanma, Işınlayıcı
+  NPC, /qa komutu ya da hile yok; bunlar zaten engellidir.
+- NPC ile konuşunca adım sonucundaki windows.dialog.options listesini oku ve select_dialog(index=N) ile seç;
+  listede olmayan bir seçenek uydurma. Aynı çağrıyı tekrarlayıp duruyorsan başka bir şey dene.
 - Ticaret yalnız GM'lerle (ör. TESTR) yapılabilir; başka oyuncuyla ticaret açma.
 - Oyuncunun yaptığı her şeyi yap: görev al ve bitir (observe → quests: available/active/ready), canavar kes,
   düşenleri topla (pickup), daha iyi ekipmanı giy (equip_item), iksir iç (use_item), satıcıdan al/sat
@@ -98,7 +102,7 @@ def _param_schema(annotation: Any) -> dict[str, Any] | None:
     return {"type": "string"}
 
 
-def behaviour_tools() -> list[ToolSpec]:
+def behaviour_tools(player: bool = False) -> list[ToolSpec]:
     tools = []
     for name, b in BEHAVIOURS.items():
         if name in EXCLUDED_BEHAVIOURS or name in META_TOOLS:
@@ -114,7 +118,8 @@ def behaviour_tools() -> list[ToolSpec]:
             if p.default is inspect.Parameter.empty:
                 required.append(p.name)
             props[p.name] = sch
-        props["expect_error"] = {"type": "string", "description": "beklenen red kodu"}
+        if not player:   # oyuncu modunda test beklentisi yok; küçük modeller "nil" gibi değerlerle adımı bozuyordu
+            props["expect_error"] = {"type": "string", "description": "beklenen red kodu"}
         doc = (b.doc or name).split("\n")[0].strip()
         tools.append(ToolSpec(name, doc, {"type": "object", "properties": props, "required": required}))
     return tools
@@ -180,6 +185,39 @@ def _entities_view(rows: list[dict[str, Any]], n: int = 12) -> list[list[Any]]:
     return [[r["vid"], r["type"], r["vnum"], r.get("name", ""), r.get("distance")] for r in rows[:n]]
 
 
+# Görev mektupları yalnız bilgi (sol kenardaki ikonlar); kapatılacak bir pencere değil — modele gösterilmez
+HIDDEN_WINDOWS = {"quest_letters"}
+_COMMAND_TEXT = re.compile(r"^(MRQ_\w+.*|[A-Za-z_]+(\s+-?\d+)*)$")
+
+
+def _windows_view(windows: Any) -> dict[str, Any]:
+    """Açık pencereler ve içerikleri: diyalog metni + numaralı seçenekler, dükkân ürünleri, yükseltme bilgisi.
+    Model seçeneği tahmin etmesin, listeden index ile seçsin."""
+    items = windows.items() if isinstance(windows, dict) else [(w.get("name"), w) for w in windows or []]
+    out: dict[str, Any] = {}
+    for name, w in items:
+        if name in HIDDEN_WINDOWS or not isinstance(w, dict):
+            continue
+        if name == "dialog":
+            out[name] = _prune({"text": str(w.get("text") or "")[-400:],
+                                "options": [f"{i}: {o}" for i, o in enumerate(w.get("options") or [])],
+                                "hint": "select_dialog(index=N) ile seç" if w.get("options") else None})
+        elif name == "shop":
+            out[name] = _prune({"npc_vid": w.get("npc_vid"),
+                                "items[slot:vnum:ad:fiyat]": [f"{i['slot']}:{i['vnum']}:{i.get('name', '')}:{i.get('price', '')}"
+                                                              for i in w.get("items") or []]})
+        else:
+            out[name] = _prune({k: v for k, v in w.items() if k != "name" and not isinstance(v, (dict, list))
+                                or k in ("materials", "options")})
+    return out
+
+
+def _messages_view(messages: list[dict[str, Any]], n: int = 5) -> list[str]:
+    """Oyuncunun okuduğu sistem mesajları; istemciye giden komutlar (MRQ_*, setblockmode 0 ...) atılır."""
+    texts = [str(m.get("text", "")) for m in messages]
+    return [t for t in texts if t.strip() and not _COMMAND_TEXT.match(t.strip())][-n:]
+
+
 def _observe_view(o: dict[str, Any]) -> dict[str, Any]:
     inv = o.get("inventory") or {}
     return _prune({
@@ -187,12 +225,9 @@ def _observe_view(o: dict[str, Any]) -> dict[str, Any]:
         "inventory": [f"{i['vnum']}x{i['count']}@{i['slot']}" for i in inv.get("items", [])],
         "equipment": {k: v["vnum"] for k, v in (inv.get("equipment") or {}).items()},
         "quests": o.get("quests"),
-        "windows": {k: _prune({"options": w.get("options"),
-                               "items": [f"{i['vnum']}:{i.get('price', '')}@{i['slot']}" for i in w.get("items", [])],
-                               **{f: w.get(f) for f in ("src_vnum", "result_vnum", "cost", "prob", "materials")}})
-                    for k, w in (o.get("windows") or {}).items()},
+        "windows": _windows_view(o.get("windows") or {}),
         "nearby[vid,tür,vnum,ad,mesafe]": _entities_view(o.get("nearby") or []),
-        "messages": [m["text"] for m in (o.get("messages") or [])[-5:]],
+        "messages": _messages_view(o.get("messages") or []),
     })
 
 
@@ -212,11 +247,20 @@ def _step_view(r: dict[str, Any]) -> dict[str, Any]:
         out["failures"] = fails
     out.update(_events_view(r.get("client_events", [])))
     out["state"] = _mini_state(r.get("state") or {})
-    windows = r.get("windows")
-    names = list(windows) if isinstance(windows, dict) else [w.get("name") for w in windows or []]
-    if names:
-        out["windows"] = names
+    wv = _windows_view(r.get("windows") or {})
+    if wv:
+        out["windows"] = wv
     return out
+
+
+LOOP_WINDOW = 10        # son kaç oyuncu çağrısına bakılır
+LOOP_REPEAT = 3         # aynı çağrı bu kadar tekrar ederse uyarı
+LOOP_MAX_WARNINGS = 3   # uyarıya rağmen sürerse oturum biter
+
+
+def _call_signature(call: ToolCall) -> str:
+    args = {k: v for k, v in (call.args or {}).items() if k != "expect_error"}
+    return f"{call.name}({json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)})"
 
 
 @dataclass
@@ -273,7 +317,7 @@ class AutoExplorer:
         rs = self.explorer.sessions[run_id]["rs"]
         transcript = rs.artifacts.path("llm_transcript.jsonl").open("w", encoding="utf-8")
 
-        tools = behaviour_tools() + meta_tools()
+        tools = behaviour_tools(player) + meta_tools()
         if player:
             tools = [t for t in tools if t.name != "qa_setup"]
         tool_names = {t.name for t in tools}
@@ -299,6 +343,8 @@ class AutoExplorer:
         findings: list[dict[str, Any]] = []
         usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "total_tokens": 0}
         steps = turns = idle = 0
+        recent: list[str] = []          # son oyuncu çağrılarının imzaları (döngü tespiti)
+        loop_warnings = 0
         stop_reason, agent_summary = "max_turns", ""
         error: str | None = None
 
@@ -350,7 +396,26 @@ class AutoExplorer:
                         steps += 1
                     results.append(ToolResult(call.name, _compact(res), call.id))
                 note = ""
-                if steps >= b.max_steps and not finished:
+                for call in calls:
+                    if call.name not in META_TOOLS:
+                        recent.append(_call_signature(call))
+                recent = recent[-LOOP_WINDOW:]
+                repeated = sorted({sig for sig in recent if recent.count(sig) >= LOOP_REPEAT})
+                if repeated and not finished:
+                    loop_warnings += 1
+                    if loop_warnings > LOOP_MAX_WARNINGS:
+                        stop_reason = "stuck_loop"
+                        agent_summary = agent_summary or f"Döngüde takıldı: {repeated[0]}"
+                        transcript.write(json.dumps({"turn": turns, "text": reply.message.text,
+                                                     "calls": [{"name": c.name, "args": c.args} for c in calls],
+                                                     "results": [{"name": r.name, "content": r.content} for r in results],
+                                                     "note": "stuck_loop", "usage": reply.usage},
+                                                    ensure_ascii=False, default=str) + "\n")
+                        break
+                    note = (f"DİKKAT: aynı çağrıyı tekrar ediyorsun ({repeated[0]}); işe yaramıyor. Durumu oku "
+                            "(observe), farklı bir yol dene ya da işi bırakıp finish ile nedenini yaz.")
+                    recent.clear()
+                elif steps >= b.max_steps and not finished:
                     note = f"Adım bütçesi ({b.max_steps}) doldu. Şimdi `finish` çağır."
                 elif turns % 10 == 0:
                     note = f"İlerleme: {steps}/{b.max_steps} adım, {len(findings)} bulgu, tur {turns}/{max_turns}."

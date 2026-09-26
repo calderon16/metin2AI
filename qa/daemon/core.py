@@ -99,7 +99,8 @@ class Daemon:
         jobs = self.db.list_jobs("queued,running", 200)
         if any(j["status"] == "queued" and j["type"] != "play_session" for j in jobs):
             return []          # önce sıradaki işler (komutlar, testler) ajan alsın
-        playing = {(j.get("params") or {}).get("account") for j in jobs if j["type"] == "play_session"}
+        playing = {(j.get("params") or {}).get("account") for j in jobs
+                   if j["type"] in ("play_session", "owner_command")}
         wanted = set(dc.player_accounts)
         created = []
         for a in self.agents.list():

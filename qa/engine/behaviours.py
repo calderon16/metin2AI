@@ -12,6 +12,7 @@ import math
 from typing import Any
 
 from ..bridge.protocol import ActionError
+from . import npcdir
 from .executor import BehaviourError, GameContext, behaviour
 
 APPROACH_RANGE = 200
@@ -411,10 +412,68 @@ def stat_up(ctx: GameContext, stat: str, times: int = 1) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ NPC / UI
 
+NPC_NEAR = 1500   # bu mesafede NPC görünür (istemci varlık listesine girer)
+
+
+@behaviour("go_to_npc")
+def go_to_npc(ctx: GameContext, name: str | None = None, vnum: int | None = None, talk: bool = True,
+              timeout_ms: int = 240000) -> dict[str, Any]:
+    """Haritadaki bir NPC'ye adıyla (ör. "Silah Satıcısı", "Demirci") ya da vnum ile yürü ve konuş.
+    Uzakta olup görünmeyen NPC'ler için harita rehberini kullanır."""
+    if name is None and vnum is None:
+        raise BehaviourError("BAD_ARGS", "name ya da vnum gerekli")
+    _refuse_teleporter(vnum, name or "")
+    s = _alive_state(ctx)
+    seen = [e for e in ctx.entities(type="npc", radius=15000)
+            if (vnum is not None and e["vnum"] == vnum) or (name and npcdir.fold(name) in npcdir.fold(e.get("name", "")))]
+    if seen:
+        target = {"vnum": seen[0]["vnum"], "name": seen[0].get("name", ""), "x": seen[0]["x"], "y": seen[0]["y"]}
+    else:
+        rows = npcdir.find(s.get("map"), name, vnum)
+        if not rows:
+            known = sorted({r["name"] for r in npcdir.npcs_on_map(s.get("map")) if r["vnum"] not in TELEPORTER_VNUMS})
+            if not known:
+                raise BehaviourError("NPC_NOT_FOUND", f"'{name or vnum}' yakında görünmüyor ve bu harita için NPC "
+                                     "rehberi yok (maps/npc_directory.json)")
+            raise BehaviourError("NPC_NOT_FOUND", f"Bu haritada '{name or vnum}' yok. Haritadaki NPC'ler: "
+                                 + ", ".join(known[:40]))
+        target = min(rows, key=lambda r: _dist(s, r["x"], r["y"]))
+    _refuse_teleporter(target["vnum"], target["name"])
+    start = ctx.now()
+    while _dist(s, target["x"], target["y"]) > NPC_NEAR:
+        if ctx.now() - start > timeout_ms:
+            raise BehaviourError("TIMEOUT", f"{target['name']} yanına ulaşılamadı", position=[s["x"], s["y"]])
+        d = _dist(s, target["x"], target["y"])
+        k = min(1.0, 4000 / d)          # uzun yolu parçalara böl (her parça yol bulmayla yürünür)
+        wx = s["x"] + (target["x"] - s["x"]) * k
+        wy = s["y"] + (target["y"] - s["y"]) * k
+        try:
+            walk_to(ctx, x=round(wx), y=round(wy), tolerance=300, timeout_ms=60000)
+        except BehaviourError as e:
+            if e.code != "STUCK":
+                raise
+        s = _alive_state(ctx)
+    if not talk:
+        return {"npc": target["name"], "vnum": target["vnum"], "x": s["x"], "y": s["y"]}
+    r = talk_npc(ctx, vnum=target["vnum"])
+    return {**r, "name": target["name"]}
+
+
+# Işınlayıcı NPC'ler: AI oyuncular hiçbir yere ışınlanmaz, yürür
+TELEPORTER_VNUMS = {9012}
+
+
+def _refuse_teleporter(vnum: Any, name: str = "") -> None:
+    if vnum in TELEPORTER_VNUMS or npcdir.fold(name).startswith("isinlayici"):
+        raise BehaviourError("TELEPORT_FORBIDDEN", "Işınlayıcı kullanılmaz; gideceğin yere yürü (walk_to / go_to_npc)")
+
+
 @behaviour("talk_npc")
 def talk_npc(ctx: GameContext, vnum: int | None = None, vid: int | None = None) -> dict[str, Any]:
     """NPC'ye yürü ve tıkla; açılan pencereyi döndür."""
+    _refuse_teleporter(vnum)
     e = move_to_entity(ctx, vnum=vnum, vid=vid, type="npc", range=APPROACH_RANGE)
+    _refuse_teleporter(e.get("vnum"), e.get("name", ""))
     ctx.act("talk_to_npc", vid=e["vid"])
     ctx.react()
     return {"npc": e["vid"], "windows": sorted(ctx.windows())}

@@ -283,3 +283,57 @@ def test_gemini_daily_quota_fails_fast():
         p.chat("s", [Message("user", "x")], [])
     assert len(calls) == 1                                  # günlük kotada boşuna beklemez
 
+
+
+def _transcript(service, run_id):
+    lines = (service.cfg.artifacts_path / run_id / "llm_transcript.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(x) for x in lines]
+
+
+def test_player_mode_shows_dialog_options_and_hides_setup(service):
+    script = [{"name": "talk_npc", "args": {"vnum": 20016}},
+              {"name": "select_dialog", "args": {"index": 0}},
+              {"name": "finish", "args": {"summary": "Görev alındı; sıradaki plan: köpek kes"}}]
+    prov = ScriptedProvider(script)
+    out = AutoExplorer(service.cfg, service.store, prov, service.factory).run(
+        "Oyna", seed=1, budget=ExploreBudget(max_steps=10), player=True)
+    assert out.stop_reason == "finished"
+    t = _transcript(service, out.run_id)
+    assert "normal bir oyuncusun" in t[0]["system"]
+    dialog = t[1]["results"][0]["content"]["windows"]["dialog"]
+    assert dialog["options"] == ["0: Kabul ediyorum", "1: Şimdi değil"] and "köpek" in dialog["text"]
+    assert "quest_letters" not in json.dumps(t[1]["results"][0]["content"])
+    tools = {x.name: x for x in behaviour_tools(player=True)}
+    assert "go_to_npc" in tools and all("expect_error" not in x.parameters["properties"] for x in tools.values())
+
+
+def test_loop_guard_stops_a_stuck_model(service):
+    prov = ScriptedProvider(lambda messages: [__import__("qa.planner.llm", fromlist=["ToolCall"]).ToolCall(
+        "talk_npc", {"vnum": 424242}, "x")])
+    out = AutoExplorer(service.cfg, service.store, prov, service.factory).run(
+        "Oyna", seed=1, budget=ExploreBudget(max_steps=100), player=True)
+    assert out.stop_reason == "stuck_loop" and out.turns <= 14
+    notes = [t.get("note", "") for t in _transcript(service, out.run_id)[1:]]
+    assert any(n.startswith("DİKKAT") for n in notes)
+
+
+def test_go_to_npc_uses_directory_and_refuses_teleporter(service, tmp_path, monkeypatch):
+    d = {"maps": {"1": {"name": "sim", "npcs": [
+        {"vnum": 9001, "name": "Genel Mağaza Satıcısı", "x": 5400, "y": 5000},
+        {"vnum": 5555, "name": "Uzak Demirci", "x": 9000, "y": 5000},
+        {"vnum": 9012, "name": "Işınlayıcı", "x": 5200, "y": 5200}]}}}
+    p = tmp_path / "npc.json"
+    p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("QA_NPC_DIRECTORY", str(p))
+    script = [{"name": "go_to_npc", "args": {"name": "genel magaza saticisi"}},
+              {"name": "go_to_npc", "args": {"name": "Uzak Demirci", "talk": False}},
+              {"name": "go_to_npc", "args": {"name": "Yok Böyle Biri"}},
+              {"name": "go_to_npc", "args": {"name": "ışınlayıcı"}},
+              {"name": "finish", "args": {"summary": "bitti"}}]
+    out = AutoExplorer(service.cfg, service.store, ScriptedProvider(script), service.factory).run(
+        "Oyna", seed=1, budget=ExploreBudget(max_steps=10), player=True)
+    r = [t["results"][0]["content"] for t in _transcript(service, out.run_id)[1:5]]
+    assert "shop" in r[0]["windows"]
+    assert r[1]["status"] == "passed" and abs(r[1]["state"]["x"] - 9000) <= 1500
+    assert "NPC_NOT_FOUND" in r[2]["error"] and "Uzak Demirci" in r[2]["error"] and "Işınlayıcı" not in r[2]["error"]
+    assert "TELEPORT_FORBIDDEN" in r[3]["error"]

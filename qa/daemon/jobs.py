@@ -8,6 +8,7 @@ Gerçek sunucuda işler paralel; sim modunda ortak dünya tek kilitle sırayla k
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import traceback
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..planner.autonomous import AutoExplorer, ExploreBudget
+from ..planner.budget import BudgetedProvider
+from ..planner.llm import Message
 from ..replay import replay_run
 from ..scenario.loader import load_scenario
 from ..scenario.runner import ScenarioRunner
@@ -206,24 +209,112 @@ def _explore_rotation(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
     return {"goal": g["id"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
 
 
-OWNER_GOAL = """Sahibin {sender} sana (oyundaki karakterin {account}) fısıltıyla şunu yazdı:
-«{text}»
+OWNER_CHAT_SYSTEM = """Sen Metin2'de {account} adlı karakteri oynayan gerçek bir oyuncu gibisin. {sender} senin
+sahibin (GM); sana oyunda fısıltıyla yazıyor. Onunla doğal, samimi ve kısa (en çok 2 cümle) Türkçe konuş.
+Oyundaki durumun (bunu bilerek cevap ver): {state}
+Şu an yaptığın: {activity}
+Son planın: {plan}
 
-Normal bir Metin2 oyuncusu gibi davran:
-1. Önce whisper ile {sender}'e kısa bir Türkçe onay yaz (ör. "Tamam, hallediyorum.").
-2. İstenen işi oyun içinde normal oyuncu eylemleriyle yap (yürü, konuş, kes, topla, giy, al/sat, + bas...).
-3. İstek bir soruysa (ör. "neredesin", "seviyen kaç") observe ile bak ve whisper ile cevap ver.
-4. Yapamıyorsan ya da istek tehlikeliyse (ticaret, eşya atma) nedenini whisper ile açıkla.
-5. Bitince whisper ile sonucu bildir, sonra finish çağır."""
+Mesajı oku ve karar ver:
+- Sohbet, selam ya da soruysa (selam, nasılsın, neredesin, seviyen kaç, ne yapıyorsun): durumuna göre cevap ver,
+  task null olsun. Selama "Tamam, hallediyorum" deme; selamla karşılık ver.
+- Oyunda yapılacak bir iş istiyorsa (git, gel, al, sat, kes, topla, giy, + bas, görev yap ...): kısa bir cevap
+  ver ve task alanına işi oyunda yapılacak açık bir cümleyle yaz.
+- {sender} bir GM'dir: onunla ticaret yapabilirsin. "Bana X ver" derse X'i SEN ona verirsin: task'a
+  "{sender}'e ticaretle X ver" yaz. Başka oyuncularla ticaret yok.
+- Işınlanmazsın: ışınlanmanı ya da Işınlayıcı'yı kullanmanı isterse yürüyerek gideceğini söyle ve task'a işin
+  yürüyerek yapılacak hâlini yaz. Hile ve /qa komutu yok.
+YALNIZCA şu JSON'u yaz, başka bir şey yazma: {{"reply": "...", "task": null}}"""
+
+OWNER_TASK_GOAL = """Sahibin {sender} fısıltıyla şunu yazdı: «{text}»
+Ona zaten cevap verdin ("{reply}"). Şimdi şu işi normal oyuncu eylemleriyle yap: {task}
+- Uzaktaki bir NPC'ye (Silah Satıcısı, Demirci ...) go_to_npc ile adıyla git; açılan diyalogda
+  windows.dialog.options listesinden index ile seç.
+- Bitince ya da yapamazsan whisper ile {sender}'e sonucu kısa ve doğal bir cümleyle bildir, sonra finish çağır."""
+
+_MEMORY_LOCK = threading.Lock()
+CHAT_HISTORY = 8
+
+
+def _parse_chat(text: str) -> tuple[str, str | None]:
+    """Modelin {"reply", "task"} yanıtı; JSON bozuksa metnin kendisi cevap sayılır (iş yok)."""
+    t = (text or "").strip()
+    if "</think>" in t:
+        t = t.rsplit("</think>", 1)[1].strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(t[start:end + 1])
+            reply = str(obj.get("reply") or "").strip()
+            task = obj.get("task")
+            task = str(task).strip() if task not in (None, "", "null", "None") else None
+            if reply or task:
+                return reply or "Tamam.", task
+        except ValueError:
+            pass
+    return (t.strip("` \n")[:200] or "Hmm?"), None
+
+
+def _update_memory(ctx: "JobContext", acc: str, fn: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    path = _player_memory_path(ctx)
+    with _MEMORY_LOCK:
+        try:
+            memory = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            memory = {}
+        entry = memory.setdefault(acc, {})
+        fn(entry)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(memory, ensure_ascii=False, indent=1), encoding="utf-8")
+        return entry
+
+
+def _read_memory(ctx: "JobContext", acc: str) -> dict[str, Any]:
+    try:
+        return json.loads(_player_memory_path(ctx).read_text(encoding="utf-8")).get(acc) or {}
+    except (OSError, ValueError):
+        return {}
 
 
 def _owner_command(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
-    """Sahibin fısıltısı: o ajanın kendisiyle (only=[hesap]) LLM keşfi olarak yürütülür."""
-    d = ctx.daemon
-    goal = OWNER_GOAL.format(sender=p["sender"], account=p["account"], text=str(p["text"])[:400])
-    ctx.progress(account=p["account"], text=str(p["text"])[:80])
-    out = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=p["account"], player=True)
-    return {"account": p["account"], **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
+    """Sahibin fısıltısı: önce ajan mesajı okuyup doğal bir cevap verir (sohbet adımı, araçsız tek LLM çağrısı);
+    mesaj bir iş istiyorsa ardından o işi oyuncu modunda (ışınlanmadan) yapar ve sonucu fısıldar."""
+    d, acc, sender = ctx.daemon, p["account"], p["sender"]
+    text = str(p["text"])[:400]
+    ctx.progress(account=acc, text=text[:80])
+    mem = _read_memory(ctx, acc)
+    with ctx._lease(1, [acc]) as (agents, _factory), d.agents.world_guard():
+        bridge = agents[0].bridge
+        st = bridge.call("get_player_state")
+        state = {k: st.get(k) for k in ("level", "hp", "max_hp", "gold", "map", "x", "y", "dead")}
+        history = [Message("assistant" if h["from"] == "me" else "user", text=h["text"]) for h in mem.get("chat", [])]
+        system = OWNER_CHAT_SYSTEM.format(account=acc, sender=sender, state=json.dumps(state, ensure_ascii=False),
+                                          activity=("oyunu oynuyordum (görev, avlanma, ekipman)"
+                                                    if d.cfg.daemon.player_mode else "boştaydım, bekliyordum"),
+                                          plan=(mem.get("summary") or "henüz yok")[:400])
+        provider = BudgetedProvider(d.make_llm_provider(), d.llm_budget())
+        try:
+            reply_text = provider.chat(system, history + [Message("user", text=text)], []).message.text
+        except Exception as e:  # noqa: BLE001 — LLM yoksa oyuncu yine de cevapsız kalmasın
+            reply_text = json.dumps({"reply": "Şu an düşünemiyorum, biraz sonra tekrar yazar mısın?", "task": None})
+            ctx.progress(chat_error=str(e)[:200])
+        reply, task = _parse_chat(reply_text)
+        with contextlib.suppress(Exception):
+            bridge.call("whisper", to=sender, message=reply[:200])
+
+    def remember(entry: dict[str, Any]) -> None:
+        chat = entry.setdefault("chat", [])
+        chat += [{"from": sender, "text": text}, {"from": "me", "text": reply}]
+        del chat[:-CHAT_HISTORY]
+
+    _update_memory(ctx, acc, remember)
+    ctx.progress(reply=reply[:120], task=(task or "")[:120])
+    out: dict[str, Any] = {"account": acc, "reply": reply, "task": task}
+    if task:
+        goal = OWNER_TASK_GOAL.format(sender=sender, text=text, reply=reply, task=task[:300])
+        res = ctx.explore(goal, d.cfg.daemon.owner_command_steps, None, None, account=acc, player=True)
+        out.update({k: res.get(k) for k in ("run_id", "result", "summary", "stop_reason")})
+    return out
 
 
 PLAY_GOAL = """Oyunu normal bir oyuncu gibi oynamaya devam et: görevleri al ve bitir, seviye atla, daha iyi
@@ -239,12 +330,7 @@ def _play_session(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
     """Oyuncu modu: tek ajanla (only=[hesap]) oyuncu istemli LLM oturumu. Bir önceki oturumun özeti (plan)
     hedefe eklenir; sahip fısıldarsa oturum hemen kesilir ki komut beklemesin."""
     d, acc = ctx.daemon, p["account"]
-    path = _player_memory_path(ctx)
-    try:
-        memory = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        memory = {}
-    last = (memory.get(acc) or {}).get("summary")
+    last = _read_memory(ctx, acc).get("summary")
     goal = PLAY_GOAL.format(memory=f"Önceki oturumun özeti ve planın:\n{last}" if last else "")
     ctx.progress(account=acc)
 
@@ -255,9 +341,7 @@ def _play_session(ctx: "JobContext", p: dict[str, Any]) -> dict[str, Any]:
                       should_stop=owner_waiting)
     summary = (out.get("agent_summary") or "").strip()
     if summary:
-        memory[acc] = {"summary": summary[:1500], "run_id": out.get("run_id")}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(memory, ensure_ascii=False, indent=1), encoding="utf-8")
+        _update_memory(ctx, acc, lambda e: e.update(summary=summary[:1500], run_id=out.get("run_id")))
     return {"account": acc, **{k: out.get(k) for k in ("run_id", "result", "summary", "stop_reason")}}
 
 

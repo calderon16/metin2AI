@@ -371,16 +371,22 @@ class ScriptedProvider:
 
     def chat(self, system: str, messages: list[Message], tools: list[ToolSpec]) -> LLMReply:
         self.seen.append(list(messages))
+        text = ""
         if callable(self.script):
             calls = self.script(messages)
+            if isinstance(calls, str):
+                text, calls = calls, []
         elif self.turn < len(self.script):
             item = self.script[self.turn]
-            items = item if isinstance(item, list) else [item]
-            calls = [ToolCall(c["name"], c.get("args", {}), f"s{self.turn}_{i}") for i, c in enumerate(items)]
+            if isinstance(item, dict) and "text" in item:
+                text, calls = str(item["text"]), []
+            else:
+                items = item if isinstance(item, list) else [item]
+                calls = [ToolCall(c["name"], c.get("args", {}), f"s{self.turn}_{i}") for i, c in enumerate(items)]
         else:
             calls = []
         self.turn += 1
-        return LLMReply(Message("assistant", "", calls), dict(self.usage_per_call))
+        return LLMReply(Message("assistant", text, calls), dict(self.usage_per_call))
 
 
 def make_provider(provider: str, model: str | None = None, **kw: Any) -> LLMProvider:

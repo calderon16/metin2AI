@@ -299,11 +299,25 @@ def test_daemon_turns_owner_whisper_into_a_job(server, prof, cfg, tmp_path):
     cfg.daemon.agents = [{"account": "AI_QA_001"}, {"account": "AI_QA_002"}]
     cfg.daemon.owners = ["TESTR"]
     cfg.daemon.snapshot_interval_s = 0.2
-    script = [{"name": "whisper", "args": {"to": "TESTR", "message": "Tamam, hallediyorum."}},
-              {"name": "walk_by", "args": {"dx": 100, "dy": 0}},
-              {"name": "whisper", "args": {"to": "TESTR", "message": "Yürüdüm."}},
-              {"name": "finish", "args": {"summary": "istek yapıldı"}}]
-    d = Daemon(cfg, llm_factory=lambda: ScriptedProvider(list(script)))
+    from qa.planner.llm import ToolCall
+
+    def make():
+        n = {"i": 0}
+
+        def script(messages):
+            first = messages[0].text or ""
+            if "fısıltıyla" not in first and "HEDEF" not in first:
+                # sohbet adımı: mesaja doğal cevap + iş
+                return '{"reply": "Tamam, hallediyorum.", "task": "biraz yürü"}'
+            i = n["i"]
+            n["i"] += 1
+            steps = [ToolCall("walk_by", {"dx": 100, "dy": 0}, "w"),
+                     ToolCall("whisper", {"to": "TESTR", "message": "Yürüdüm."}, "m"),
+                     ToolCall("finish", {"summary": "istek yapıldı"}, "f")]
+            return [steps[min(i, 2)]]
+        return ScriptedProvider(script)
+
+    d = Daemon(cfg, llm_factory=make)
     d.start()
     try:
         assert d.agents.wait_online(2, 15)
@@ -346,9 +360,9 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
         def script(messages):
             i = n["i"]
             n["i"] += 1
-            if "fısıltıyla" in (messages[0].text or ""):
-                return [ToolCall("whisper", {"to": "TESTR", "message": "Tamam"}, "o0")] if i == 0 else \
-                    [ToolCall("finish", {"summary": "komut bitti"}, "o1")]
+            first = messages[0].text or ""
+            if "fısıltıyla" not in first and "HEDEF" not in first:
+                return '{"reply": "Tamam", "task": null}'      # sohbet adımı: iş yok, yalnız cevap
             return [ToolCall("wait", {"ms": 300}, f"p{i}")]
         return Rec(script)
 
@@ -369,7 +383,14 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
         jobs = d.db.list_jobs(None, 20)
         play = next(j for j in jobs if j["type"] == "play_session" and j["status"] != "running")
         assert play["result"]["stop_reason"] == "preempted"
-        assert any(j["type"] == "owner_command" for j in jobs)
+        owner = next(j for j in jobs if j["type"] == "owner_command")
+        deadline = time.monotonic() + 10
+        while owner["status"] != "done" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            owner = d.db.get_job(owner["job_id"])
+        # sohbet mesajı: cevap verildi, iş (keşif) başlatılmadı
+        assert owner["result"]["reply"] == "Tamam" and owner["result"]["task"] is None
+        assert not owner["result"].get("run_id")
         assert not [c for c in server.world.stats.get("qa_commands", []) if "reset" in c or "warp" in c]
         assert seen and all("qa_setup" not in tools for _, tools in seen)
         assert any("normal bir oyuncusun" in s for s, _ in seen)
