@@ -52,6 +52,41 @@ class Daemon:
         except ValueError:
             pass
 
+    def player_info(self) -> dict[str, Any]:
+        """Oyuncu modu durumu: ayar, ajan başına şu anki iş ve son oturum özeti (plan)."""
+        import json
+        from pathlib import Path
+
+        dc = self.cfg.daemon
+        try:
+            memory = json.loads((Path(self.cfg.resolve("artifacts")) / "daemon" / "player_memory.json")
+                                .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            memory = {}
+        active: dict[str, dict[str, Any]] = {}
+        for j in self.db.list_jobs("queued,running", 200):
+            acc = (j.get("params") or {}).get("account")
+            if acc and j["type"] in ("play_session", "owner_command") and                     (acc not in active or j["type"] == "owner_command"):
+                active[acc] = {"job_id": j["job_id"], "type": j["type"], "status": j["status"],
+                               "text": (j.get("params") or {}).get("text")}
+        return {"enabled": dc.player_mode, "accounts": dc.player_accounts, "session_steps": dc.player_session_steps,
+                "owners": dc.owners, "llm_available": self.llm_available(),
+                "agents": {a["account"]: {"activity": active.get(a["account"]),
+                                          "last_plan": (memory.get(a["account"]) or {}).get("summary"),
+                                          "last_run_id": (memory.get(a["account"]) or {}).get("run_id")}
+                           for a in self.agents.list()}}
+
+    def set_player_mode(self, enabled: bool) -> dict[str, Any]:
+        """Çalışırken aç/kapat (qa.local.toml'a yazılmaz). Kapatınca sıradaki/çalışan oturumlar iptal edilir."""
+        self.cfg.daemon.player_mode = bool(enabled)
+        if enabled and self.started and self.scheduler._thread is None:
+            self.scheduler.start()
+        if not enabled:
+            for j in self.db.list_jobs("queued,running", 200):
+                if j["type"] == "play_session":
+                    self.jobs.cancel(j["job_id"])
+        return self.player_info()
+
     def owner_command_pending(self, account: str) -> bool:
         return any(j["type"] == "owner_command" and (j.get("params") or {}).get("account") == account
                    for j in self.db.list_jobs("queued", 200))

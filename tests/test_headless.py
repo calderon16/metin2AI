@@ -373,5 +373,12 @@ def test_player_mode_plays_without_teleport_and_yields_to_owner(server, prof, cf
         assert not [c for c in server.world.stats.get("qa_commands", []) if "reset" in c or "warp" in c]
         assert seen and all("qa_setup" not in tools for _, tools in seen)
         assert any("normal bir oyuncusun" in s for s, _ in seen)
+        from qa.daemon.server import Api
+
+        info = Api(d).dispatch("GET", "/api/player", {}, None)
+        assert info["enabled"] and "AI_QA_001" in info["agents"] and info["owners"] == ["TESTR"]
+        off = Api(d).dispatch("POST", "/api/player", {}, {"enabled": False})
+        assert off["enabled"] is False
+        assert not [j for j in d.db.list_jobs("queued", 50) if j["type"] == "play_session"]
     finally:
         d.shutdown()
