@@ -187,7 +187,10 @@ class JobManager:
         if job_type == "scenario":
             load_scenario(self.daemon.cfg.scenarios_path, params["name"])  # yoksa hata
         if job_type == "explore" and not self.daemon.llm_available():
-            raise ValueError(f"LLM anahtarı yok: {self.daemon.cfg.explorer.api_key_env} ortam değişkenini ayarlayın")
+            e = self.daemon.cfg.explorer
+            if e.provider == "ollama":
+                raise ValueError(f"Ollama'ya ulaşılamıyor ({e.ollama_url}); Ollama'yı başlatın")
+            raise ValueError(f"LLM anahtarı yok: {e.api_key_env} ortam değişkenini ayarlayın")
         if job_type == "explore":
             blocked = self.daemon.llm_budget().blocked_reason()
             if blocked:

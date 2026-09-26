@@ -6,6 +6,8 @@ enum
 	HEADER_GC_KEY_AGREEMENT_COMPLETED = 0xfa,
 	HEADER_GC_KEY_AGREEMENT = 0xfb,
 	HEADER_GC_WARP = 41,
+	HEADER_CG_EXCHANGE = 50,
+	HEADER_GC_EXCHANGE = 42,
 };
 
 enum EFixtureKind { KIND_A, KIND_B };
@@ -28,6 +30,26 @@ typedef struct packet_warp
 	long	lAddr;
 	WORD	wPort;
 } TPacketGCWarp;
+
+typedef struct command_exchange
+{
+	BYTE		header;
+	BYTE		subheader;
+	DWORD		arg1;
+	BYTE		arg2;
+	TItemPos	Pos;
+} TPacketCGExchange;
+
+typedef struct packet_exchange
+{
+	BYTE		header;
+	BYTE		subheader;
+	BYTE		is_me;
+	DWORD		arg1;
+	TItemPos	arg2;
+	DWORD		arg3;
+	long		alValues[3];
+} TPacketGCExchange;
 
 struct TPacketKeyAgreementCompleted
 {

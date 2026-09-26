@@ -42,7 +42,6 @@ class HeadlessError(Exception):
 
 NOT_SUPPORTED = {
     "buy_item", "sell_item", "use_skill", "unequip_item", "drop_item", "change_channel",
-    "trade_request", "trade_add_item", "trade_set_gold", "trade_accept", "trade_cancel",
     "party_invite", "party_answer", "party_leave", "party_kick",
 }
 
@@ -80,6 +79,11 @@ class HeadlessClient:
         self.ground: dict[int, dict[str, Any]] = {}
         self.items: dict[int, dict[str, Any]] = {}
         self.dialog: dict[str, Any] | None = None
+        self.quest_letters: dict[int, str] = {}         # sol taraftaki görev mektupları: idx -> başlık
+        self.quests: dict[str, dict[str, Any]] = {}     # Metin2Re görev motoru (MRQ_*): kimlik -> durum
+        self.quests_available: dict[str, dict[str, Any]] = {}
+        self.quests_done: set[str] = set()
+        self.trade: dict[str, Any] | None = None
         self.messages: list[dict[str, Any]] = []
         self.log_lines: list[dict[str, Any]] = []
         self._msg_seq = self._log_seq = 0
@@ -136,7 +140,18 @@ class HeadlessClient:
         return out + [resp]
 
     def close(self) -> None:
+        self._leave_cleanly()
         self._drop_connection()
+
+    def _leave_cleanly(self) -> None:
+        """Oyundan çıkmadan önce açık görev penceresini kapat. Sunucu, bağlantı kopsa da karakterin görev
+        durumunu (cevap bekleyen seçim dahil) tutar; kapatılmazsa sonraki oturumda o görev menüde görünmez."""
+        if self.conn is None or not self.in_game or self.dialog is None:
+            return
+        try:
+            self._close_dialog()
+        except (ProtocolError, HeadlessError):
+            pass
 
     def _drop_connection(self) -> None:
         if self.conn is not None:
@@ -275,12 +290,16 @@ class HeadlessClient:
             text = p.trailing.split(b"\0", 1)[0].decode(self.profile.encoding, errors="replace")
             ctype = g("type")
             ct = self.b["chat_types"]
+            if ctype == ct.get("COMMAND", -1) and text.startswith("MRQ_"):
+                self._on_mrq(text)
             if ctype in (ct["INFO"], ct["NOTICE"], ct.get("COMMAND", -1)):
                 self.message(text)
             else:
                 self.log(f"chat: {text}")
         elif logical == "script":
             self._on_script(p.trailing)
+        elif logical == "exchange":
+            self._on_exchange(g)
 
     def _do_warp(self) -> None:
         """Yeni çekirdeğe bağlan ve aynı karakterle doğrudan oyuna gir (gerçek istemcinin DirectEnter akışı)."""
@@ -358,17 +377,142 @@ class HeadlessClient:
 
     def _on_script(self, raw: bytes) -> None:
         text = raw.split(b"\0", 1)[0].decode(self.profile.encoding, errors="replace")
-        options: list[tuple[int, str]] = []
+        # Görev mektubu (ekranın solundaki bildirim) diyalog değildir: açık diyaloğu ezmemeli
+        letter = re.fullmatch(r"\s*\[QUESTBUTTON idx;(\d+)\|name;([^\]]*)\]\s*(\[DONE\])?\s*", text)
+        if letter:
+            self.quest_letters[int(letter.group(1))] = letter.group(2).strip()
+            self.event("quest_letter", index=int(letter.group(1)), title=letter.group(2).strip())
+            return
+        options: list[str] = []
+        answers: list[int] = []
         q = re.search(r"\[QUESTION ([^\]]*)\]", text)
         if q:
+            # Gerçek istemci seçeneğin sırasını (0'dan) gönderir; metindeki "1;" numarası değil
             for i, part in enumerate(q.group(1).split("|")):
-                num, _, label = part.partition(";")
-                options.append((int(num) if num.strip().isdigit() else i, label or part))
+                _, _, label = part.partition(";")
+                options.append((label or part).strip())
+                answers.append(i)
+        elif "[NEXT]" in text:
+            options, answers = ["Devam"], [self.b["script_close_answer"]]
         clean = re.sub(r"\[[^\]]*\]", " ", text)
         clean = " ".join(clean.split())
-        self.dialog = {"text": clean, "options": [o[1] for o in options] or ["Kapat"],
-                       "answers": [o[0] for o in options] or [self.b["script_close_answer"]]}
+        # Kapatma (ESC) gerçek istemcideki gibi: soru → son seçeneğin sırası, [NEXT] → 254, [DONE] → hiçbir şey
+        close = answers[-1] if q else (self.b["script_close_answer"] if "[NEXT]" in text else None)
+        self.dialog = {"text": clean, "options": options or ["Kapat"], "answers": answers or [None],
+                       "close": close}
         self.event("window_opened", name="dialog")
+
+    # ------------------------------------------------------------------ Metin2Re görev motoru (MRQ_*)
+    @staticmethod
+    def _dehex(h: str) -> str:
+        if not h or h == "-":
+            return ""
+        try:
+            return bytes.fromhex(h).decode("cp1254", errors="replace")
+        except ValueError:
+            return ""
+
+    def _on_mrq(self, text: str) -> None:
+        """mr2_qlib.lua'nın istemciye gönderdiği görev komutları (client/Client/mr2quest.py ile aynı biçim)."""
+        a = text.split()
+        cmd, args = a[0], a[1:]
+        try:
+            if cmd == "MRQ_Q" and len(args) >= 5:
+                qid = args[0]
+                q = self.quests.setdefault(qid, {"objs": {}, "mark": None})
+                desc = self._dehex(args[4])
+                if q.get("desc") != desc:
+                    q["objs"] = {}
+                q.update(status=int(args[1]), turnin=int(args[2]), title=self._dehex(args[3]), desc=desc)
+                self.quests_done.discard(qid)
+                self.quests_available.pop(qid, None)
+            elif cmd == "MRQ_O" and len(args) >= 5 and args[0] in self.quests:
+                self.quests[args[0]]["objs"][int(args[1])] = (int(args[2]), int(args[3]), self._dehex(args[4]))
+            elif cmd == "MRQ_M" and len(args) >= 6 and args[0] in self.quests:
+                self.quests[args[0]]["mark"] = tuple(int(v) for v in args[1:6])
+            elif cmd == "MRQ_U" and args and args[0] in self.quests:
+                self.quests[args[0]]["mark"] = None
+            elif cmd == "MRQ_D" and args:
+                if self.quests.pop(args[0], None) is not None:
+                    self.quests_done.add(args[0])
+            elif cmd == "MRQ_A" and len(args) >= 6:
+                self.quests_available[args[0]] = {
+                    "npc": int(args[1]), "vid": int(args[2]), "x": int(args[3]), "y": int(args[4]),
+                    "gate": bool(int(args[5])), "title": self._dehex(args[6]) if len(args) > 6 else ""}
+            elif cmd == "MRQ_AX" and args:
+                self.quests_available.pop(args[0], None)
+        except ValueError:
+            self.log(f"MRQ ayrıştırılamadı: {text}")
+
+    # ------------------------------------------------------------------ ticaret (CG/GC_EXCHANGE)
+    def _xsub(self, key: str) -> int:
+        return int(self.b["exchange_subheaders"][key])
+
+    def _on_exchange(self, g: Callable[..., Any]) -> None:
+        sub, is_me = g("sub"), bool(g("is_me", 0))
+        gc = {k: int(v) for k, v in self.b["exchange_subheaders"].items() if k.startswith("GC_")}
+        if sub == gc["GC_START"]:
+            vid = int(g("arg1", 0))
+            partner = self.chars.get(vid, {})
+            self.trade = {"partner_vid": vid, "partner_name": partner.get("name", ""), "my_items": {},
+                          "their_items": {}, "my_gold": 0, "their_gold": 0, "my_accepted": False,
+                          "their_accepted": False}
+            self.event("trade_started", partner_vid=vid, partner_name=partner.get("name", ""))
+            return
+        t = self.trade
+        if sub == gc["GC_ALREADY"]:
+            self.message("Oyuncu zaten ticarette")
+            return
+        if sub == gc["GC_LESS_ELK"]:
+            self.message("Yeterli Yang yok.")
+            return
+        if t is None:
+            return
+        side = "my" if is_me else "their"
+        if sub == gc["GC_ITEM_ADD"]:
+            pos = g("arg2") or {}
+            cell = pos.get("cell", 0) if isinstance(pos, dict) else int(pos or 0)
+            t[f"{side}_items"][cell] = {"vnum": int(g("arg1", 0)), "count": int(g("arg3", 1))}
+            t["my_accepted"] = t["their_accepted"] = False
+            self.event("trade_updated")
+        elif sub == gc["GC_ITEM_DEL"]:
+            t[f"{side}_items"].pop(int(g("arg1", 0)), None)
+            t["my_accepted"] = t["their_accepted"] = False
+            self.event("trade_updated")
+        elif sub == gc["GC_ELK_ADD"]:
+            t[f"{side}_gold"] = int(g("arg1", 0))
+            t["my_accepted"] = t["their_accepted"] = False
+            self.event("trade_updated")
+        elif sub == gc["GC_ACCEPT"]:
+            t[f"{side}_accepted"] = bool(g("arg1", 0))
+            self.event("trade_updated")
+        elif sub == gc["GC_END"]:
+            done = t["my_accepted"] and t["their_accepted"]
+            self.trade = None
+            if done:
+                self.event("trade_completed")
+            else:
+                self.event("trade_cancelled", reason="CANCELLED")
+            t["completed"] = done
+            self._last_trade = t
+
+    def _need_trade(self) -> dict[str, Any]:
+        if self.trade is None:
+            raise HeadlessError("NO_TRADE", "Açık ticaret yok")
+        return self.trade
+
+    def _send_exchange(self, key: str, arg1: int = 0, arg2: int = 0, pos: dict[str, Any] | None = None) -> None:
+        self._send("exchange", sub=self._xsub(key), arg1=int(arg1), arg2=int(arg2),
+                   pos=pos or {"window_type": 0, "cell": 0xFFFF})
+
+    def _trade_view(self) -> dict[str, Any]:
+        t = self.trade or {}
+        items = lambda d: [{"slot": c, "vnum": v["vnum"], "count": v["count"], "name": str(v["vnum"])}  # noqa: E731
+                           for c, v in sorted(d.items())]
+        return {"partner_vid": t.get("partner_vid"), "partner_name": t.get("partner_name"),
+                "my_items": items(t.get("my_items", {})), "their_items": items(t.get("their_items", {})),
+                "my_gold": t.get("my_gold", 0), "their_gold": t.get("their_gold", 0),
+                "my_accepted": t.get("my_accepted", False), "their_accepted": t.get("their_accepted", False)}
 
     def _tick(self) -> None:
         """Hareket ve saldırı döngüleri: gerçek client gibi zamanla paket gönderir."""
@@ -495,10 +639,33 @@ class HeadlessClient:
         return {"vid": c["vid"], "type": c["type"], "vnum": c["race"], "name": c.get("name"), "dead": c.get("dead")}
 
     def cmd_get_open_windows(self) -> list[dict[str, Any]]:
-        return [{"name": "dialog", "text": self.dialog["text"], "options": self.dialog["options"]}] if self.dialog else []
+        out = [{"name": "dialog", "text": self.dialog["text"], "options": self.dialog["options"]}] if self.dialog else []
+        if self.trade is not None:
+            out.append({"name": "trade", **self._trade_view()})
+        if self.quest_letters:
+            out.append({"name": "quest_letters", "letters": [{"index": i, "title": t}
+                                                             for i, t in sorted(self.quest_letters.items())]})
+        return out
 
     def cmd_get_quest_state(self) -> dict[str, Any]:
-        return {}
+        """Metin2Re görev motoru durumu (QA istemci köprüsüyle aynı biçim; koordinatlar dünya koordinatı).
+        Alınabilir görevler state="available" ve veren NPC hedefiyle döner."""
+        out: dict[str, Any] = {}
+        for qid, a in self.quests_available.items():
+            out[qid] = {"state": "available", "title": a["title"], "progress": 0, "objs": [], "marked": True,
+                        "target": {"npc": a["npc"], "vid": a["vid"], "x": a["x"], "y": a["y"], "gate": a["gate"]}}
+        for qid, q in self.quests.items():
+            objs = [{"label": label, "cur": cur, "max": mx} for _, (cur, mx, label) in sorted(q["objs"].items())]
+            entry = {"state": "ready" if q.get("status") == 2 else "active", "title": q.get("title", ""),
+                     "progress": sum(min(o["cur"], o["max"]) for o in objs), "objs": objs,
+                     "marked": q.get("mark") is not None}
+            if q.get("mark"):
+                npc, vid, x, y, gate = q["mark"]
+                entry["target"] = {"npc": npc, "vid": vid, "x": x, "y": y, "gate": bool(gate)}
+            out[qid] = entry
+        for qid in self.quests_done:
+            out.setdefault(qid, {"state": "done", "title": "", "progress": 0, "objs": [], "marked": False})
+        return out
 
     def cmd_get_party(self) -> dict[str, Any]:
         return {"in_party": False, "members": []}
@@ -577,6 +744,7 @@ class HeadlessClient:
 
     def cmd_logout(self) -> dict[str, Any]:
         self._need_game()
+        self._leave_cleanly()
         self._drop_connection()
         self.account = None
         return {}
@@ -642,6 +810,11 @@ class HeadlessClient:
         self._need_alive()
         e = self._entity(int(vid))
         self._in_range(e, self.b["interact_range"])
+        if self.dialog is not None:
+            # Oyuncu gibi: açık görev penceresini kapat. Cevap bekleyen görev açık kaldıkça sunucu o görevin
+            # başka NPC'lerdeki seçeneklerini menüye koymaz.
+            self.log("açık diyalog kapatıldı (yeni NPC'ye tıklamadan önce)")
+            self._close_dialog()
         self._send("on_click", vid=int(vid))
         self._pump(300)
         return {"window": "dialog" if self.dialog else None}
@@ -654,14 +827,82 @@ class HeadlessClient:
         if not 0 <= int(index) < len(d["options"]):
             raise HeadlessError("BAD_OPTION", "Geçersiz seçenek")
         self.dialog = None
-        self._send("script_answer", answer=d["answers"][int(index)])
+        answer = d["answers"][int(index)]
+        if answer is not None:           # [DONE] penceresinin "Kapat"ı sunucuya bir şey göndermez
+            self._send("script_answer", answer=answer)
         self._pump(200)
         return {"selected": d["options"][int(index)]}
 
+    def _close_dialog(self) -> None:
+        d, self.dialog = self.dialog, None
+        if d is not None and d.get("close") is not None:
+            self._send("script_answer", answer=d["close"])
+            self._pump(200)
+
     def cmd_close_window(self, name: str) -> dict[str, Any]:
         if name == "dialog" and self.dialog:
-            self.dialog = None
-            self._send("script_answer", answer=self.b["script_close_answer"])
+            self._close_dialog()
+        return {}
+
+    # ------------------------------------------------------------------ ticaret
+    def cmd_trade_request(self, vid: int) -> dict[str, Any]:
+        self._need_alive()
+        if self.trade is not None:
+            raise HeadlessError("ALREADY_TRADING", "Zaten ticaretteyim")
+        e = self.chars.get(int(vid))
+        if e is None or e.get("type") != "pc":
+            raise HeadlessError("NO_ENTITY", f"Oyuncu bulunamadı (VID {vid})")
+        self._in_range(e, self.b["trade_range"])
+        since = self._msg_seq
+        self._send_exchange("CG_START", arg1=int(vid))
+        deadline = time.monotonic() + 3.0
+        while self.trade is None and time.monotonic() < deadline and self.conn is not None:
+            self._pump(100)
+        if self.trade is None:
+            why = [m["text"] for m in self.messages if m["seq"] > since]
+            raise HeadlessError("TRADE_REFUSED", "Ticaret açılmadı" + (f": {why[-1]}" if why else
+                                " (oyuncu meşgul, ticareti engellemiş ya da çok uzakta olabilir)"))
+        return {"partner": self.trade.get("partner_name") or e.get("name", "")}
+
+    def cmd_trade_add_item(self, slot: int) -> dict[str, Any]:
+        t = self._need_trade()
+        slot = int(slot)
+        self._item_pos(slot)
+        if any(v.get("_slot") == slot for v in t["my_items"].values()):
+            raise HeadlessError("ALREADY_ADDED", "Item zaten eklendi")
+        used = set(t["my_items"])
+        free = next((i for i in range(self.b["trade_max_items"]) if i not in used), None)
+        if free is None:
+            raise HeadlessError("TRADE_FULL", "Ticaret penceresi dolu")
+        self._send_exchange("CG_ITEM_ADD", arg2=free, pos=self._item_pos(slot))
+        self._pump(300)
+        if free in t["my_items"]:
+            t["my_items"][free]["_slot"] = slot
+        return {}
+
+    def cmd_trade_set_gold(self, amount: int) -> dict[str, Any]:
+        self._need_trade()
+        amount = int(amount)
+        if amount < 0 or amount > (self._point("GOLD", 0) or 0):
+            raise HeadlessError("NOT_ENOUGH_GOLD", "Yetersiz yang")
+        self._send_exchange("CG_ELK_ADD", arg1=amount)
+        self._pump(300)
+        return {}
+
+    def cmd_trade_accept(self) -> dict[str, Any]:
+        self._need_trade()
+        self._last_trade = None
+        self._send_exchange("CG_ACCEPT")
+        self._pump(600)
+        last = getattr(self, "_last_trade", None)
+        if last is not None:
+            return {"completed": bool(last.get("completed")), "cancelled": None if last.get("completed") else "CANCELLED"}
+        return {"completed": False, "cancelled": None}
+
+    def cmd_trade_cancel(self) -> dict[str, Any]:
+        self._need_trade()
+        self._send_exchange("CG_CANCEL")
+        self._pump(300)
         return {}
 
     def cmd_send_chat(self, message: str) -> dict[str, Any]:

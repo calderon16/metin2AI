@@ -117,9 +117,10 @@ def create_explorer_provider(config: Any, model_override: str | None = None) -> 
     """Keşif için yapılandırılmış birincil ve günlük-kota yedeğini kurar."""
     from .llm import make_provider
 
+    extra = ({"base_url": config.ollama_url, "num_ctx": config.num_ctx} if config.provider == "ollama"
+             else {"api_key_env": config.api_key_env, "thinking_budget": config.thinking_budget})
     primary = make_provider(config.provider, model_override or config.model,
-                            api_key_env=config.api_key_env, temperature=config.temperature,
-                            thinking_budget=config.thinking_budget)
+                            temperature=config.temperature, **extra)
     if config.fallback_provider == "codex_cli":
         return QuotaFallbackProvider(primary, CodexCliProvider())
     if config.fallback_provider:

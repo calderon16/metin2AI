@@ -42,7 +42,13 @@ class Daemon:
 
     # ------------------------------------------------------------------ LLM
     def llm_available(self) -> bool:
-        return self._llm_factory is not None or bool(os.environ.get(self.cfg.explorer.api_key_env))
+        if self._llm_factory is not None:
+            return True
+        if self.cfg.explorer.provider == "ollama":
+            from ..planner.llm import ollama_available
+
+            return ollama_available(self.cfg.explorer.ollama_url)
+        return bool(os.environ.get(self.cfg.explorer.api_key_env))
 
     def make_llm_provider(self) -> LLMProvider:
         if self._llm_factory is not None:

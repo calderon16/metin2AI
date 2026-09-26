@@ -23,6 +23,7 @@ from .profile import Profile
 HANDSHAKE = 0x1234ABCD
 LOGIN_KEY = 777
 MOB_VID, NPC_VID, ME_VID = 200, 300, 100
+PC_VID = 500          # improved profilde: ticareti kabul eden gerçek oyuncu (TESTR)
 MAX_STEP = 400  # tek MOVE paketinde izin verilen en büyük mesafe (hız kontrolü)
 
 
@@ -45,6 +46,9 @@ class _Handler(socketserver.BaseRequestHandler):
         self.me = {"x": 5000, "y": 5000, "gold": 0, "hp": 400, "items": {0: [27001, 3]}}
         self.name = ""
         self.seq_index = 0
+        self.quest_step = ""
+        self.pending = None
+        self.trade = None
         self.key_agreement: ImprovedKeyAgreement | None = None
 
     def send(self, header: str, **v: Any) -> None:
@@ -129,6 +133,9 @@ class _Handler(socketserver.BaseRequestHandler):
             self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=MOB_VID, name="Yaban Köpeği")
             self.send("HEADER_GC_CHARACTER_ADD", dwVID=NPC_VID, x=4800, y=5000, bType=1, wRaceNum=9001)
             self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=NPC_VID, name="Satıcı")
+            if "HEADER_GC_EXCHANGE" in self.server.profile.packets:
+                self.send("HEADER_GC_CHARACTER_ADD", dwVID=PC_VID, x=5100, y=5000, bType=6, wRaceNum=0)
+                self.send("HEADER_GC_CHAR_ADDITIONAL_INFO", dwVID=PC_VID, name="TESTR")
             self.send("HEADER_GC_PING")
         elif name == "HEADER_CG_PONG":
             with self.w.lock:
@@ -162,10 +169,20 @@ class _Handler(socketserver.BaseRequestHandler):
                 self.me["hp"] = min(400, self.me["hp"] + 50)
                 self.point(5, self.me["hp"])
         elif name == "HEADER_CG_ON_CLICK" and d["vid"] == NPC_VID:
-            text = "Merhaba yolcu![ENTER]Ne istersin?[QUESTION 1;Görev ver|2;Hoşça kal][DONE]".encode("cp1254") + b"\0"
-            self.c.send("HEADER_GC_SCRIPT", {"skin": 0, "src_size": len(text)}, text)
+            if self.quest_step == "offered":
+                # Metin2Re görev motoru: NPC menüsünde görev adı, sonra Kabul/Reddet
+                self.script("[QUESTION 1;Yeni Nöbetçi|2;Kapat]")
+                self.pending = "menu"
+            elif self.quest_step == "active":
+                self.script("Aferin![ENTER]Görevi tamamladın.[NEXT]")
+                self.pending = "finish"
+            else:
+                self.script("Merhaba yolcu![ENTER]Ne istersin?[QUESTION 1;Görev ver|2;Hoşça kal][DONE]")
+        elif name == "HEADER_CG_EXCHANGE":
+            self.on_exchange(d)
         elif name == "HEADER_CG_SCRIPT_ANSWER":
             self.chat(f"cevap {d['answer']}")
+            self.on_quest_answer(d["answer"])
         elif name == "HEADER_CG_CHAT":
             msg = trailing.split(b"\0", 1)[0].decode("cp1254")
             parts = msg.split()
@@ -174,6 +191,11 @@ class _Handler(socketserver.BaseRequestHandler):
                 if cmd == "gold":
                     self.me["gold"] = int(parts[2])
                     self.point(11, self.me["gold"])
+                elif cmd == "quest":
+                    # görev teklifi: mektup + alınabilir işareti
+                    self.quest_step = "offered"
+                    self.script("[QUESTBUTTON idx;85|name;Yeni Nöbetçi][DONE]")
+                    self.mrq(f"MRQ_A s1_1 9001 {NPC_VID} 4800 5000 0 {'Yeni Nöbetçi'.encode('cp1254').hex().upper()}")
                 elif cmd == "hp":
                     self.me["hp"] = int(parts[2])
                     self.point(5, self.me["hp"])
@@ -185,6 +207,75 @@ class _Handler(socketserver.BaseRequestHandler):
                 self.chat(f"[QA] OK {cmd}")
             else:
                 self.chat(f"{self.name} : {msg}", ctype=0)
+
+
+def _handler_extras() -> None:
+    """Görev ve ticaret yardımcıları (improved profil testleri için)."""
+
+    def script(self, text: str) -> None:
+        raw = text.encode("cp1254") + b"\0"
+        self.c.send("HEADER_GC_SCRIPT", {"skin": 0, "src_size": len(raw)}, raw)
+
+    def mrq(self, text: str) -> None:
+        self.chat(text, ctype=5)
+
+    def on_quest_answer(self, answer: int) -> None:
+        pending, self.pending = getattr(self, "pending", None), None
+        hexs = lambda t: t.encode("cp1254").hex().upper()  # noqa: E731
+        if pending == "menu" and answer == 0:
+            self.script("Köyü korur musun?[QUESTION 1;Kabul|2;Reddet]")
+            self.pending = "accept"
+        elif pending == "accept" and answer == 0:
+            self.quest_step = "active"
+            self.mrq("MRQ_AX s1_1")
+            self.mrq(f"MRQ_Q s1_1 1 9001 {hexs('Yeni Nöbetçi')} {hexs('Muhafızla konuş')}")
+            self.mrq(f"MRQ_O s1_1 0 0 1 {hexs('Muhafızla konuş')}")
+            self.mrq(f"MRQ_M s1_1 9001 {NPC_VID} 4800 5000 0")
+        elif pending == "finish" and answer == 254:
+            self.quest_step = "done"
+            self.mrq("MRQ_D s1_1")
+            self.chat("Görev tamamlandı: Yeni Nöbetçi")
+
+    def on_exchange(self, d: dict) -> None:
+        sub = d["subheader"]
+        pos = {"window_type": 0, "cell": 0}
+        ex = lambda s, me, a1=0, a2=None, a3=0: self.send(  # noqa: E731
+            "HEADER_GC_EXCHANGE", subheader=s, is_me=me, arg1=a1, arg2=a2 or pos, arg3=a3)
+        if sub == 0 and d["arg1"] == PC_VID:
+            self.trade = {"items": {}, "gold": 0}
+            ex(0, 1, PC_VID)
+        elif not getattr(self, "trade", None):
+            return
+        elif sub == 1:
+            cell = d["Pos"]["cell"]
+            vnum, count = self.me["items"].get(cell, [0, 0])
+            if vnum:
+                self.trade["items"][d["arg2"]] = cell
+                ex(1, 1, vnum, {"window_type": 0, "cell": d["arg2"]}, count)
+        elif sub == 3:
+            self.trade["gold"] = d["arg1"]
+            ex(3, 1, d["arg1"])
+        elif sub == 4:
+            ex(4, 1, 1)
+            ex(4, 0, 1)          # TESTR de onaylar
+            for cell in self.trade["items"].values():
+                self.me["items"].pop(cell, None)
+                self.item(cell, 0, 0)
+            self.me["gold"] -= self.trade["gold"]
+            self.point(11, self.me["gold"])
+            with self.w.lock:
+                self.w.stats["trades"] = self.w.stats.get("trades", 0) + 1
+            self.trade = None
+            ex(5, 0)
+        elif sub == 5:
+            self.trade = None
+            ex(5, 0)
+
+    for fn in (script, mrq, on_quest_answer, on_exchange):
+        setattr(_Handler, fn.__name__, fn)
+
+
+_handler_extras()
 
 
 class _Server(socketserver.ThreadingTCPServer):

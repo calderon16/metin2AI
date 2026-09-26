@@ -39,6 +39,12 @@ DEFAULT_BINDINGS: dict[str, Any] = {
     "interact_range": 400,
     "attack_interval_ms": 700,
     "script_close_answer": 254,
+    # Ticaret (input_main.cpp Exchange / exchange.cpp): EXCHANGE_MAX_DISTANCE ve pencere boyu
+    "trade_range": 1000,
+    "trade_max_items": 12,
+    "exchange_subheaders": {"CG_START": 0, "CG_ITEM_ADD": 1, "CG_ITEM_DEL": 2, "CG_ELK_ADD": 3, "CG_ACCEPT": 4,
+                            "CG_CANCEL": 5, "GC_START": 0, "GC_ITEM_ADD": 1, "GC_ITEM_DEL": 2, "GC_ELK_ADD": 3,
+                            "GC_ACCEPT": 4, "GC_END": 5, "GC_ALREADY": 6, "GC_LESS_ELK": 7},
     # Boyutu `size` alanından değil bayrak bitlerinden çıkan paketler. Klasik kaynakta questpc.cpp
     # SendQuestInfoPacket `qi.size`'ı paketi tampona yazdıktan sonra artırır; giden size hep 6 kalır ve
     # istemci ek alanları flag'e göre okur. {header: {flag_offset, base, fields: {bit: bayt}}}
@@ -101,6 +107,8 @@ DEFAULT_BINDINGS: dict[str, Any] = {
         "item_pickup": {"cg": ["HEADER_CG_ITEM_PICKUP"], "vid": ["vid", "dwVID"]},
         "on_click": {"cg": ["HEADER_CG_ON_CLICK"], "vid": ["vid", "dwVID"]},
         "script_answer": {"cg": ["HEADER_CG_SCRIPT_ANSWER"], "answer": ["answer"]},
+        "exchange": {"cg": ["HEADER_CG_EXCHANGE"], "gc": ["HEADER_GC_EXCHANGE"], "sub": ["subheader", "sub_header"],
+                     "is_me": ["is_me"], "arg1": ["arg1"], "arg2": ["arg2"], "arg3": ["arg3"], "pos": ["Pos", "pos"]},
     },
 }
 

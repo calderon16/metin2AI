@@ -129,7 +129,7 @@ def test_headless_full_flow(server, prof):
     assert b.call("get_system_messages")[-1]["text"] == "[QA] OK gold"
     assert server.world.stats["pongs"] == 1
     with pytest.raises(ActionError, match="NOT_SUPPORTED"):
-        b.call("trade_request", vid=1)
+        b.call("party_invite", vid=1)
     b.close()
 
 
@@ -172,7 +172,7 @@ assert:
   - inventory_contains: 30000
   - item_count: {vnum: 27001, delta: -1}
   - gold: {equals: 250}
-  - system_message: cevap 1
+  - system_message: cevap 0      # gerçek istemci gibi 0 tabanlı seçenek sırası
 """)
     rep = ScenarioRunner(cfg, Store(cfg.db_file)).run(sc, seed=1)
     assert rep["result"] == "PASSED", rep["summary"]
@@ -201,15 +201,18 @@ def test_daemon_with_headless_agents(server, prof, cfg, tmp_path):
         d.shutdown()
 
 
-def test_bulk_jobs_only_pick_scenarios_for_the_bridge_mode(cfg):
+def test_bulk_jobs_only_pick_scenarios_for_the_bridge_mode(cfg, monkeypatch):
     from qa.service import QaService
 
+    fake = [{"name": "sim_only", "tags": ["smoke"]}, {"name": "real_walk", "tags": ["real"]},
+            {"name": "real_gui", "tags": ["real", "real_only", "needs_client"]},
+            {"name": "real_quest", "tags": ["real", "real_only", "quest"]}]
+    monkeypatch.setattr(QaService, "list_scenarios", lambda self, tag=None: [s for s in fake
+                                                                           if tag is None or tag in s["tags"]])
     names = lambda: {s["name"] for s in QaService(cfg).runnable_scenarios()}  # noqa: E731
     cfg.bridge.mode = "sim"
-    assert "smoke_login_walk" in names() and "real_quest_s1_1" not in names()
+    assert names() == {"sim_only", "real_walk"}
     cfg.bridge.mode = "headless"
-    got = names()
-    assert "real_smoke_login_walk" in got and "smoke_login_walk" not in got
-    assert "real_quest_s1_1" not in got        # needs_client: görev penceresi ister
+    assert names() == {"real_walk", "real_quest"}           # needs_client (görsel) hariç
     cfg.bridge.mode = "tcp"
-    assert "real_quest_s1_1" in names()
+    assert names() == {"real_walk", "real_gui", "real_quest"}

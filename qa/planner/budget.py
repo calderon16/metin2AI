@@ -109,6 +109,8 @@ class LLMBudget:
     def blocked_reason(self) -> str | None:
         """Bütçe dolduysa nedeni (Türkçe), değilse None."""
         c = self.cfg
+        if getattr(c, "provider", "") == "ollama":
+            return None                     # yerel model: kota ve ücret yok
         t = self.today()
         if c.daily_request_limit is not None and t["requests"] >= c.daily_request_limit:
             return f"Günlük LLM istek tavanı doldu ({t['requests']}/{c.daily_request_limit})"
@@ -161,7 +163,7 @@ class BudgetedProvider:
 
     def _rate_limit(self) -> None:
         rpm = self.budget.cfg.requests_per_minute
-        if not rpm or rpm <= 0:
+        if not rpm or rpm <= 0 or self.name == "ollama":
             return
         interval = 60.0 / rpm
         key = f"{self.name}:{self.model}"

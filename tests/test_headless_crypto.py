@@ -179,3 +179,64 @@ def test_headless_refuses_improved_server_without_config(improved_prof):
             LocalBridge(c.handle).call("login", account="AI_QA_001", password="qa")
     finally:
         server.shutdown()
+
+
+def _game(prof):
+    server = FakeMetin2(prof, improved=True)
+    c = HeadlessClient(_cfg(server, crypto="improved"), profile=prof)
+    b = LocalBridge(c.handle, on_close=c.close)
+    b.connect()
+    b.call("login", account="AI_QA_001", password="qa")
+    b.call("select_character", name="AI_QA_001")
+    return server, b
+
+
+def test_headless_trades_with_a_real_player(improved_prof):
+    server, b = _game(improved_prof)
+    try:
+        pcs = b.call("get_nearby_entities", type="pc")
+        assert pcs[0]["name"] == "TESTR"
+        assert b.call("trade_request", vid=pcs[0]["vid"]) == {"partner": "TESTR"}
+        b.call("trade_add_item", slot=0)
+        win = [w for w in b.call("get_open_windows") if w["name"] == "trade"][0]
+        assert win["partner_name"] == "TESTR" and win["my_items"][0]["vnum"] == 27001
+        assert b.call("trade_accept")["completed"] is True
+        evs = [e["event"] for e in b.drain_events()]
+        assert "trade_started" in evs and "trade_completed" in evs
+        assert 27001 not in {i["vnum"] for i in b.call("get_inventory")["items"]}
+        assert server.world.stats["trades"] == 1 and server.world.stats["seq_errors"] == 0
+        with pytest.raises(Exception, match="NO_TRADE"):
+            b.call("trade_accept")
+        b.close()
+    finally:
+        server.shutdown()
+
+
+def test_headless_follows_metin2re_quest_engine(improved_prof):
+    server, b = _game(improved_prof)
+    try:
+        b.call("send_chat", message="/qa quest")
+        b.call("wait", ms=300)
+        letters = [w for w in b.call("get_open_windows") if w["name"] == "quest_letters"]
+        assert letters and letters[0]["letters"] == [{"index": 85, "title": "Yeni Nöbetçi"}]
+        assert not [w for w in b.call("get_open_windows") if w["name"] == "dialog"]   # mektup diyalog değil
+        q = b.call("get_quest_state")["s1_1"]
+        assert q["state"] == "available" and q["target"]["npc"] == 9001 and q["title"] == "Yeni Nöbetçi"
+        b.call("talk_to_npc", vid=300)
+        assert b.call("get_open_windows")[0]["options"] == ["Yeni Nöbetçi", "Kapat"]
+        b.call("select_dialog", index=0)       # 0 tabanlı cevap: "Yeni Nöbetçi"
+        b.call("wait", ms=300)
+        assert b.call("get_open_windows")[0]["options"] == ["Kabul", "Reddet"]
+        b.call("select_dialog", index=0)
+        b.call("wait", ms=300)
+        q = b.call("get_quest_state")["s1_1"]
+        assert q["state"] == "active" and q["objs"] == [{"label": "Muhafızla konuş", "cur": 0, "max": 1}]
+        assert q["target"] == {"npc": 9001, "vid": 300, "x": 4800, "y": 5000, "gate": False}
+        b.call("talk_to_npc", vid=300)
+        assert b.call("get_open_windows")[0]["options"] == ["Devam"]
+        b.call("select_dialog", index=0)       # [NEXT] → 254
+        b.call("wait", ms=300)
+        assert b.call("get_quest_state")["s1_1"]["state"] == "done"
+        b.close()
+    finally:
+        server.shutdown()
