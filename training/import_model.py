@@ -63,7 +63,7 @@ def import_gguf(gguf: Path, base: str, tag: str, num_ctx: int = 12288) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("gguf", type=Path)
-    ap.add_argument("--base", default="qwen2.5:7b", help="eğitimin temel aldığı Ollama modeli (şablon için)")
+    ap.add_argument("--base", default="qwen3:8b", help="eğitimin temel aldığı Ollama modeli (şablon için)")
     ap.add_argument("--tag", default="metin2re-qa:candidate")
     ap.add_argument("--num-ctx", type=int, default=12288)
     a = ap.parse_args()

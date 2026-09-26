@@ -19,7 +19,7 @@ Metin2Re QA ajanı olarak eğitir ve **Ollama için GGUF** dosyası üretir.
 Süre: ~300 örnekte T4 üzerinde 15–30 dk. Çıktı: `metin2re-qa.Q4_K_M.gguf` (~4.7 GB) → bilgisayarınıza indirip
 `python training/import_model.py <gguf>` ile Ollama'ya ekleyin."""),
     ("code", """# Ayarlar — kıyaslamada kazanan temel modeli seçin (training/README.md)
-BASE_MODEL = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"   # ya da unsloth/Qwen3-8B-bnb-4bit, unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit
+BASE_MODEL = "unsloth/Qwen3-8B-bnb-4bit"   # kıyaslamada kazanan (26 Eylül); diğerleri: unsloth/Qwen2.5-7B-Instruct-bnb-4bit, unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit
 MAX_SEQ_LEN = 8192          # eğitimde örnek başına en fazla token (uzun olanlar kırpılmaz, atlanır)
 EPOCHS = 2
 LR = 2e-4

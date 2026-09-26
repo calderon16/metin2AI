@@ -45,7 +45,7 @@ devreye alınır.
    [[daemon.schedules]]
    name = "haftalik-egitim"
    every = "168h"
-   job = { type = "learning_cycle" }
+   job = { type = "learning_cycle", base_ollama = "qwen3:8b", base_unsloth = "unsloth/Qwen3-8B-bnb-4bit" }
    ```
 Bunlar Studio → AI QA Player → İşler'den elle de başlatılabilir.
 

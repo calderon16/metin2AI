@@ -60,7 +60,7 @@ def run_cycle(params: dict[str, Any] | None = None, explore_fn: Callable[..., di
     from training.promote import decide, model_exists
 
     p = params or {}
-    base_ollama = p.get("base_ollama", "qwen2.5:7b")
+    base_ollama = p.get("base_ollama", "qwen3:8b")
     min_samples = int(p.get("min_samples", 150))
     stamp = time.strftime("%Y%m%d-%H%M")
     st = _state()
@@ -127,7 +127,7 @@ def run_cycle(params: dict[str, Any] | None = None, explore_fn: Callable[..., di
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", help="eğitilmiş GGUF dosyası (yoksa incoming/Kaggle)")
-    ap.add_argument("--base-ollama", default="qwen2.5:7b")
+    ap.add_argument("--base-ollama", default="qwen3:8b")
     ap.add_argument("--min-samples", type=int, default=150)
     a = ap.parse_args()
     res = run_cycle({"gguf": a.gguf, "base_ollama": a.base_ollama, "min_samples": a.min_samples})

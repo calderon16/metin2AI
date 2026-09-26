@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -85,8 +86,8 @@ def push_kernel(dataset_id: str, base_model: str | None, log: Callable[[str], No
         nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         if base_model:
             for c in nb["cells"]:
-                c["source"] = [ln.replace('BASE_MODEL = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"',
-                                          f'BASE_MODEL = "{base_model}"') for ln in c["source"]]
+                c["source"] = [re.sub(r'^BASE_MODEL = "[^"]*"', f'BASE_MODEL = "{base_model}"', ln)
+                               for ln in c["source"]]
         (Path(tmp) / NOTEBOOK.name).write_text(json.dumps(nb, ensure_ascii=False), encoding="utf-8")
         meta = {"id": kid, "title": KERNEL_SLUG, "code_file": NOTEBOOK.name, "language": "python",
                 "kernel_type": "notebook", "is_private": True, "enable_gpu": True, "enable_internet": True,
