@@ -79,14 +79,32 @@ def walk_by(ctx: GameContext, dx: int = 0, dy: int = 0, tolerance: int = 150, ti
     return walk_to(ctx, x=int(s["x"]) + dx, y=int(s["y"]) + dy, tolerance=tolerance, timeout_ms=timeout_ms)
 
 
+def _resolve_quest(state: dict[str, Any], quest: str) -> str:
+    """Kimlik → aynen; değilse başlık eşleşmesi; o da yoksa işaretli (hedefli) tek görev. Bulunamazsa
+    geçerli kimlikleri listeleyen hata (küçük modeller hedef cümlesini kimlik sanabiliyor)."""
+    if quest in state:
+        return quest
+    q = (quest or "").strip().lower()
+    by_title = [k for k, v in state.items() if q and str(v.get("title", "")).strip().lower() in (q,)]
+    if len(by_title) == 1:
+        return by_title[0]
+    marked = [k for k, v in state.items() if v.get("target")]
+    if len(marked) == 1:
+        return marked[0]
+    valid = ", ".join(f"{k} ({v.get('title', '')}, {v.get('state')})" for k, v in state.items()) or "görev yok"
+    raise BehaviourError("UNKNOWN_QUEST", f"'{quest}' bir görev kimliği değil. Geçerli kimlikler: {valid}")
+
+
 @behaviour("go_to_quest_npc")
 def go_to_quest_npc(ctx: GameContext, quest: str, talk: bool = True, timeout_ms: int = 180000) -> dict[str, Any]:
-    """Görevin işaretlediği NPC'ye yürü ve konuş (Metin2Re görev motoru).
+    """Görevin işaretlediği NPC'ye yürü ve konuş; quest = observe'daki görev kimliği (ör. s1_1).
 
     Hedef, oyuncunun gördüğü yanıp sönen harita işaretiyle aynıdır; ara noktalar istemcinin yol
     rehberinin (yerdeki oklar) hesapladığı yoldan alınır. NPC başka haritadaysa hedef ışınlayıcıdır.
+    Kimlik yerine görev başlığı verilirse ya da işaretli tek görev varsa o kullanılır.
     """
     start = ctx.now()
+    quest = _resolve_quest(ctx.query("get_quest_state"), quest)
     while True:
         q = ctx.query("get_quest_state").get(quest) or {}
         t = q.get("target")

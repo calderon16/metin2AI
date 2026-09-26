@@ -27,8 +27,8 @@ from training.import_model import ollama_exe  # noqa: E402
 def decide(cand: dict, cur: dict | None, margin: float, max_drop: float) -> tuple[bool, str]:
     if cur is None:
         return True, "mevcut model yok; aday ilk model olarak devreye alınır"
-    by_goal = {g["goal"]: g["score"] for g in cur["goals"]}
-    drops = [(g["goal"], by_goal.get(g["goal"], 0) - g["score"]) for g in cand["goals"]]
+    by_goal = {g["goal_id"]: g["score"] for g in cur["goals"]}
+    drops = [(g["goal_id"], by_goal.get(g["goal_id"], 0) - g["score"]) for g in cand["goals"]]
     worst = max(drops, key=lambda d: d[1], default=("-", 0.0))
     if cand["score"] < cur["score"] + margin:
         return False, f"aday {cand['score']:.3f} < mevcut {cur['score']:.3f} + {margin}"

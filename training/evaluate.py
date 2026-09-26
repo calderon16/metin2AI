@@ -131,7 +131,7 @@ def run_model(model: str, goals: dict[str, Any], only: list[str] | None, account
         dur = round(time.monotonic() - t0, 1)
         adir = artifacts_of(out["run_id"]) if out.get("run_id") and artifacts_of else None
         m = score_goal(g, read_transcript(adir / "llm_transcript.jsonl") if adir else [], out)
-        rows.append({"goal": g["id"], "run_id": out.get("run_id"), "result": out.get("result"), "error": err,
+        rows.append({"goal_id": g["id"], "run_id": out.get("run_id"), "result": out.get("result"), "error": err,
                      "stop_reason": out.get("stop_reason"), "findings": len(out.get("findings") or []),
                      "seconds": dur, "turns": out.get("turns"), "tokens": (out.get("usage") or {}).get("total_tokens"),
                      **m})

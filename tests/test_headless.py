@@ -258,3 +258,15 @@ def test_headless_refuses_to_walk_off_the_map(server, prof):
         b.call("move_to", x=5000, y=-100)        # harita 0..25600; y < 0 dışarıda
     b.call("move_to", x=5200, y=5000)            # içeride: kabul
     b.close()
+
+
+def test_quest_id_resolution_helps_small_models():
+    from qa.engine.behaviours import BehaviourError, _resolve_quest
+
+    st = {"s1_1": {"title": "Yeni Nöbetçi", "state": "available", "target": {"npc": 20354}},
+          "s1_2": {"title": "Erken Gelen Kış", "state": "available"}}
+    assert _resolve_quest(st, "s1_1") == "s1_1"
+    assert _resolve_quest(st, "yeni nöbetçi") == "s1_1"                            # başlıkla
+    assert _resolve_quest(st, "Köyde sana verilecek yeni bir görev var.") == "s1_1"  # işaretli tek görev
+    with pytest.raises(BehaviourError, match="Geçerli kimlikler: a \(A, active\), b"):
+        _resolve_quest({"a": {"title": "A", "state": "active"}, "b": {"title": "B", "state": "active"}}, "x")

@@ -73,9 +73,9 @@ def test_modelfile_keeps_template_and_swaps_from(tmp_path):
 
 
 def test_promotion_decision():
-    cur = {"score": 0.6, "goals": [{"goal": "a", "score": 0.6}, {"goal": "b", "score": 0.6}]}
-    better = {"score": 0.7, "goals": [{"goal": "a", "score": 0.8}, {"goal": "b", "score": 0.6}]}
-    regress = {"score": 0.7, "goals": [{"goal": "a", "score": 1.0}, {"goal": "b", "score": 0.2}]}
+    cur = {"score": 0.6, "goals": [{"goal_id": "a", "score": 0.6}, {"goal_id": "b", "score": 0.6}]}
+    better = {"score": 0.7, "goals": [{"goal_id": "a", "score": 0.8}, {"goal_id": "b", "score": 0.6}]}
+    regress = {"score": 0.7, "goals": [{"goal_id": "a", "score": 1.0}, {"goal_id": "b", "score": 0.2}]}
     assert decide(better, cur, 0.02, 0.25)[0]
     assert not decide(regress, cur, 0.02, 0.25)[0]                  # bir hedefte çok gerileme
     assert not decide({"score": 0.61, "goals": []}, cur, 0.02, 0.25)[0]
