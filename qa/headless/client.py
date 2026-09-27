@@ -1066,7 +1066,10 @@ class HeadlessClient:
             self._close_dialog()
         if self.refine_window is not None:
             self._cancel_refine()
-        self._close_shop()
+        try:
+            self._close_shop()
+        except ProfileError:
+            self.shop = None      # dükkân paketi olmayan profil: sunucuda açık dükkân da olamaz
 
     # ------------------------------------------------------------------ dükkân
     def _close_shop(self) -> None:
