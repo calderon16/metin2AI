@@ -326,6 +326,12 @@ def main(argv: list[str] | None = None) -> int:
               f"({t['cached_tokens']:,} önbellekten) · ${t['cost_usd']:.4f} ({tier}; ücretli olsaydı ${t['list_cost_usd']:.4f})")
         print(f"Bu ay: {m['requests']} istek · {m['total_tokens']:,} token · ${m['cost_usd']:.4f} "
               f"(ücretli olsaydı ${m['list_cost_usd']:.4f})")
+        for name, pv in (u.get("providers") or {}).items():
+            pt = pv["today"]
+            cap = (f" / {lim['daily_requests']}" if pv["metered"] and lim["daily_requests"] is not None
+                   else "" if pv["metered"] else " (yerel, tavana sayılmaz)")
+            print(f"  {name:10} bugün {pt['requests']}{cap} istek · {pt['total_tokens']:,} token · "
+                  f"bu ay {pv['month']['requests']} istek" + (f" · DURDU: {pv['blocked']}" if pv["blocked"] else ""))
         if u["blocked"]:
             print(f"DURDU: {u['blocked']}")
         for d in u["daily"]:

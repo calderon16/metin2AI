@@ -23,17 +23,17 @@ def test_price_record_and_limits(service):
     assert b.today()["cost_usd"] == 0
     assert b.today()["list_cost_usd"] > 0
     cfg.daily_request_limit = 1
-    assert "istek" in b.blocked_reason()
+    assert "istek" in b.blocked_reason("scripted")
     cfg.daily_request_limit = None
     cfg.daily_token_limit = 1100
-    assert "token" in b.blocked_reason()
+    assert "token" in b.blocked_reason("scripted")
     cfg.daily_token_limit = None
     cfg.monthly_cost_limit_usd = .00001
-    assert b.blocked_reason() is None  # ücretsiz katman harcama tavanını tüketmez
+    assert b.blocked_reason("scripted") is None  # ücretsiz katman harcama tavanını tüketmez
     cfg.free_tier = False
     b.record("scripted", "test", "run-2", USAGE)
     assert b.today()["cost_usd"] > 0
-    assert "harcama" in b.blocked_reason()
+    assert "harcama" in b.blocked_reason("scripted")
 
 
 def test_budgeted_provider_rate_and_usage(service, monkeypatch):
@@ -126,3 +126,114 @@ def test_compact_views():
                     "state": {"hp": 9, "secret": "x"}, "windows": {"shop": {}}})
     assert r["counts"]["damage_dealt"] == 20 and r["windows"] == {"shop": {}}
     assert len(json.dumps(r)) < 500
+
+
+def test_limits_are_per_provider_and_ollama_is_free(service):
+    cfg = service.cfg.explorer
+    b = LLMBudget(service.store, cfg)
+    cfg.daily_request_limit = 2
+    for _ in range(5):
+        b.record("ollama", "qwen3:8b", "r", USAGE)       # yerel: kaydedilir, tavana sayılmaz
+    assert b.today("ollama")["requests"] == 5
+    assert b.blocked_reason("ollama") is None
+    assert b.blocked_reason("gemini") is None
+    b.record("gemini", "flash", "r", USAGE)
+    b.record("gemini", "flash", "r", USAGE)
+    assert "[gemini]" in b.blocked_reason("gemini")
+    assert b.blocked_reason("codex_cli") is None           # her sağlayıcı kendi kullanımıyla dolar
+    # Keşif sağlayıcısı ollama olsa bile Gemini tavanı uygulanır (eski "ollama → sınırsız" kısa yolu yok)
+    cfg.provider = "ollama"
+    assert b.blocked_reason() is None
+    assert b.blocked_reason("gemini") is not None
+    st = b.status()
+    assert st["providers"]["ollama"]["metered"] is False
+    assert st["providers"]["gemini"]["remaining_requests_today"] == 0
+    assert st["providers"]["gemini"]["blocked"]
+
+
+def test_parallel_calls_do_not_hold_lock_or_exceed_daily_limit(service):
+    import threading
+    import time as _time
+
+    from qa.planner.budget import BudgetExceeded
+    from qa.planner.llm import LLMReply
+
+    cfg = service.cfg.explorer
+    cfg.daily_request_limit = 3
+    cfg.requests_per_minute = 0
+    budget = LLMBudget(service.store, cfg)
+    inflight, peak, gate = [0], [0], threading.Event()
+    lock = threading.Lock()
+
+    class Slow:
+        name, model = "gemini", "flash"
+
+        def chat(self, system, messages, tools):
+            with lock:
+                inflight[0] += 1
+                peak[0] = max(peak[0], inflight[0])
+            gate.wait(5)
+            with lock:
+                inflight[0] -= 1
+            return LLMReply(Message("assistant", "ok"), dict(USAGE))
+
+    results: list[str] = []
+
+    def worker():
+        try:
+            BudgetedProvider(Slow(), budget, "par").chat("s", [Message("user", "x")], [])
+            results.append("ok")
+        except BudgetExceeded:
+            results.append("budget")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    deadline = _time.monotonic() + 5
+    while _time.monotonic() < deadline and results.count("budget") < 5:
+        _time.sleep(.01)
+    # Kilit model çağrısında tutulmuyor: 3 çağrı aynı anda sürüyor; kalan 5'i rezervasyon yüzünden reddedildi
+    assert peak[0] == 3
+    gate.set()
+    for t in threads:
+        t.join(5)
+    assert results.count("ok") == 3 and results.count("budget") == 5
+    assert budget.today("gemini")["requests"] == 3
+
+
+def test_failed_call_releases_reservation_and_fallback_records_real_provider(service):
+    from qa.planner import budget as mod
+    from qa.planner.codex_fallback import QuotaFallbackProvider
+    from qa.planner.llm import LLMError, LLMReply, QuotaExhausted
+
+    cfg = service.cfg.explorer
+    cfg.daily_request_limit = 1
+    cfg.requests_per_minute = 0
+    budget = LLMBudget(service.store, cfg)
+
+    class Boom:
+        name, model = "gemini", "flash"
+
+        def chat(self, *a):
+            raise LLMError("ağ yok")
+
+    with pytest.raises(LLMError):
+        BudgetedProvider(Boom(), budget).chat("s", [], [])
+    assert mod._RESERVED.get("gemini", 0) == 0
+    assert budget.blocked_reason("gemini") is None          # başarısız çağrı sayılmadı, yer iade edildi
+
+    class Quota:
+        name, model = "gemini", "flash"
+
+        def chat(self, *a):
+            raise QuotaExhausted("gün bitti")
+
+    class Codex:
+        name, model = "codex_cli", "configured"
+
+        def chat(self, *a):
+            return LLMReply(Message("assistant", "ok"), dict(USAGE))
+
+    BudgetedProvider(QuotaFallbackProvider(Quota(), Codex()), budget).chat("s", [], [])
+    assert budget.today("codex_cli")["requests"] == 1
+    assert budget.today("gemini")["requests"] == 0

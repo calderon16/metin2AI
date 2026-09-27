@@ -235,6 +235,7 @@ async function overview() {
       <dt>Önbellek</dt><dd>%${cachePct} · ${Number(today.cached_tokens || 0).toLocaleString("tr-TR")} token</dd>
       <dt>Maliyet</dt><dd>$${Number(today.cost_usd || 0).toFixed(4)} · ücretli olsaydı $${Number(today.list_cost_usd || 0).toFixed(4)}</dd>
       <dt>Bu ay</dt><dd>${esc(month.requests || 0)} istek · ${Number(month.total_tokens || 0).toLocaleString("tr-TR")} token · $${Number(month.cost_usd || 0).toFixed(4)}</dd></dl>
+      ${providerUsageHtml(usage)}
       ${usage.blocked ? `<div class="fail-box">Keşif bütçesi doldu: ${esc(usage.blocked)}</div>` : ""}</div>
     <div class="card"><div class="row" style="justify-content:space-between"><h2>Sistem sağlığı</h2>${lc ? `<a href="#/kampanya/${lc.id}">Kampanya #${lc.id} →</a>` : ""}</div>
       ${matrixHtml(catalog, (lc && lc.matrix) || {})}</div>
@@ -244,6 +245,17 @@ async function overview() {
       <div class="card"><div class="row" style="justify-content:space-between"><h2>Açık bulgular</h2><a href="#/bulgular">Tümü →</a></div>${findingsTable(findings)}</div>
     </div>
   </div>`;
+}
+
+function providerUsageHtml(usage) {
+  const rows = Object.entries(usage.providers || {});
+  if (!rows.length) return "";
+  const cap = (usage.limits || {}).daily_requests;
+  return `<table class="provider-usage"><thead><tr><th>Sağlayıcı</th><th class="num">Bugün</th><th class="num">Bu ay</th><th>Durum</th></tr></thead><tbody>${rows.map(([name, p]) => `<tr>
+    <td class="mono">${esc(name)}</td>
+    <td class="num">${esc(p.today.requests || 0)}${p.metered ? ` / ${esc(cap ?? "∞")}` : ""}</td>
+    <td class="num">${esc(p.month.requests || 0)}</td>
+    <td><small>${p.blocked ? `<span class="badge bad">durdu</span>` : p.metered ? "kotalı" : "yerel · sınırsız"}</small></td></tr>`).join("")}</tbody></table>`;
 }
 
 function updateEnv(st) {

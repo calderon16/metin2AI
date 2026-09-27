@@ -191,3 +191,6 @@ details > summary { cursor: pointer; font-weight: 600; }
 dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 20px; width: min(380px, 92vw); }
 dialog::backdrop { background: rgba(0,0,0,.4); }
 dialog form { display: grid; gap: 12px; }
+
+.provider-usage { margin-top: 8px; font-size: 13px; }
+.provider-usage td, .provider-usage th { padding: 4px 6px; }
