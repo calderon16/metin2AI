@@ -155,6 +155,8 @@ class Player:
         self.inventory = [None] * INVENTORY_SIZE
         self.equipment = {}
         self.quests = {}
+        if hasattr(self, "mounts"):
+            del self.mounts
 
     def count_item(self, vnum: int) -> int:
         return sum(s["count"] for s in self.inventory if s and s["vnum"] == vnum)
@@ -946,15 +948,34 @@ class SimClient:
 
     def cmd_mount_command(self, op: str, kind: int = 0) -> dict[str, Any]:
         self._need_game()
-        if op not in ("list", "ride", "dismount", "feed"):
-            raise SimError("BAD_ARGS", "op: list | ride | dismount | feed")
+        if op not in ("list", "summon", "dismiss", "ride", "dismount", "feed", "appearance"):
+            raise SimError("BAD_ARGS", "Geçersiz binek işlemi")
+        mounts = self.cmd_get_mounts()
+        kind = int(kind)
+        if op in ("summon", "ride", "feed", "appearance"):
+            if not 1 <= kind <= 5:
+                raise SimError("BAD_ARGS", "kind: 1..5")
+            if not mounts["kinds"][kind - 1]["own"]:
+                raise SimError("NOT_OWNED", "Bu bineğe sahip değilsin")
         if op in ("ride", "feed"):
-            raise SimError("NOT_OWNED", "Simülatörde binek yok")
-        return self.cmd_get_mounts()
+            raise SimError("NOT_SUPPORTED", "Simülatörde at koşulları ve yem tüketimi modellenmedi")
+        if op == "summon":
+            mounts.update(summoned=kind, appearance=kind, active=0, riding=False)
+        elif op == "appearance":
+            mounts["appearance"] = kind
+        elif op == "dismount":
+            mounts.update(active=0, riding=False)
+        elif op == "dismiss":
+            mounts.update(active=0, summoned=0, appearance=0, riding=False)
+        return mounts
 
     def cmd_get_mounts(self) -> dict[str, Any]:
-        return {"active": 0, "kinds": [{"kind": i, "own": False, "level": 0, "xp": 0, "need": 0, "bonus": 0}
-                                       for i in range(1, 6)], "messages": []}
+        p = self._need_game()
+        if not hasattr(p, "mounts"):
+            p.mounts = {"active": 0, "summoned": 0, "appearance": 0, "riding": False,
+                        "kinds": [{"kind": i, "own": False, "level": 0, "xp": 0, "need": 0, "bonus": 0}
+                                  for i in range(1, 6)], "messages": []}
+        return p.mounts
 
     def cmd_split_item(self, slot: int, count: int) -> dict[str, Any]:
         p = self._need_free()

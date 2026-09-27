@@ -646,9 +646,16 @@ def cmd_get_target_info(a):
 def cmd_mount_command(a):
 	_need_game()
 	op = a.get("op")
-	if op not in ("list", "ride", "dismount", "feed"):
-		raise QaError("BAD_ARGS", "op: list | ride | dismount | feed")
+	if op not in ("list", "summon", "dismiss", "ride", "dismount", "feed", "appearance"):
+		raise QaError("BAD_ARGS", "Gecersiz binek islemi")
 	kind = int(a.get("kind") or 0)
+	if op in ("summon", "ride", "feed", "appearance") and not 1 <= kind <= 5:
+		raise QaError("BAD_ARGS", "kind: 1..5")
+	mod = _mr2systems()
+	if mod is not None:
+		mod.MOUNT["kinds"] = []
+		mod.MOUNT["summoned"] = None
+		mod.MOUNT["_qa_state_deadline"] = _now() + 3300
 	if kind:
 		net.SendChatPacket("/mr2mount %s %d" % (op, kind))
 	else:
@@ -660,10 +667,14 @@ def cmd_get_mounts(a):
 	mod = _mr2systems()
 	if mod is None or not mod.MOUNT.get("kinds"):
 		return None
+	if mod.MOUNT.get("summoned") is None and _now() < mod.MOUNT.get("_qa_state_deadline", 0):
+		return None
 	kinds = []
 	for i, k in enumerate(mod.MOUNT["kinds"]):
 		kinds.append({"kind": i + 1, "own": bool(k[0]), "level": k[1], "xp": k[2], "need": k[3], "bonus": k[4]})
-	return {"active": mod.MOUNT.get("active", 0), "kinds": kinds}
+	return {"active": mod.MOUNT.get("active", 0), "kinds": kinds,
+		"summoned": mod.MOUNT.get("summoned") or 0, "appearance": mod.MOUNT.get("appearance", 0),
+		"riding": bool(mod.MOUNT.get("riding", 0))}
 
 
 def cmd_split_item(a):

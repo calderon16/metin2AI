@@ -506,7 +506,11 @@ class HeadlessClient:
                 for i, k in enumerate(p[2:], 1):
                     own, lv, xp, need, bonus = (int(x) for x in k.split(":")[:5])
                     kinds.append({"kind": i, "own": bool(own), "level": lv, "xp": xp, "need": need, "bonus": bonus})
-                self.mounts = {"active": int(p[1]), "kinds": kinds}
+                self.mounts = {"active": int(p[1]), "kinds": kinds,
+                               "summoned": 0, "appearance": 0, "riding": bool(int(p[1]))}
+            elif p[0] == "MR_MOUNT_STATE" and len(p) >= 4 and self.mounts is not None:
+                self.mounts.update(summoned=int(p[1]), appearance=int(p[2]), riding=bool(int(p[3])))
+                self._mount_state_received = True
         except (ValueError, IndexError):
             self.log(f"MR2 ayrıştırılamadı: {text}")
 
@@ -1053,6 +1057,17 @@ class HeadlessClient:
             self._cancel_refine()
         return {}
 
+    def _close_windows_for_trade(self) -> None:
+        """Sunucu, dükkân/depo/görev penceresi açık karakterle ticaret başlatmaz (exchange.cpp ExchangeStart:
+        "Başka bir pencere açıkken…", karşı taraf için "Diğer oyuncu şu an meşgul"). Yerel dükkân kaydı sunucuyla
+        ayrışabildiği için (ör. görev seçeneğiyle açılan dükkân) dükkân kapatma paketi koşulsuz gönderilir;
+        açık dükkân yoksa sunucu bunu yok sayar (shop_manager.cpp StopShopping)."""
+        if self.dialog is not None:
+            self._close_dialog()
+        if self.refine_window is not None:
+            self._cancel_refine()
+        self._close_shop()
+
     # ------------------------------------------------------------------ dükkân
     def _close_shop(self) -> None:
         self.shop = None
@@ -1225,13 +1240,18 @@ class HeadlessClient:
 
     def cmd_mount_command(self, op: str, kind: int = 0) -> dict[str, Any]:
         self._need_game()
-        if op not in ("list", "ride", "dismount", "feed"):
-            raise HeadlessError("BAD_ARGS", "op: list | ride | dismount | feed")
+        if op not in ("list", "summon", "dismiss", "ride", "dismount", "feed", "appearance"):
+            raise HeadlessError("BAD_ARGS", "Geçersiz binek işlemi")
+        if op in ("summon", "ride", "feed", "appearance") and not 1 <= int(kind) <= 5:
+            raise HeadlessError("BAD_ARGS", "kind: 1..5")
         before = self._msg_seq
         self.mounts = None
+        self._mount_state_received = False
         self._chat_command(f"/mr2mount {op} {int(kind)}" if kind else f"/mr2mount {op}")
         if not self._pump_for(lambda: self.mounts is not None, 3.0):
             raise HeadlessError("NO_RESPONSE", "Sunucu binek listesini göndermedi (sistem kapalı olabilir)")
+        # Eski sunucular STATE yollamaz; bekleme kısa ve sınırlıdır.
+        self._pump_for(lambda: self._mount_state_received, 0.3)
         msgs = self._msgs_since(before)
         return {**self.mounts, "messages": [m for m in msgs if not m.startswith("MR_")][-3:]}
 
@@ -1281,6 +1301,7 @@ class HeadlessClient:
             raise HeadlessError("TRADE_FORBIDDEN", f"{e.get('name') or vid} ile ticaret yasak (yalnız: "
                                 f"{', '.join(self.cfg.trade_partners)})")
         self._in_range(e, self.b["trade_range"])
+        self._close_windows_for_trade()
         since = self._msg_seq
         self._send_exchange("CG_START", arg1=int(vid))
         deadline = time.monotonic() + 3.0

@@ -37,7 +37,7 @@ STATE_COMMANDS: dict[str, str] = {
     "get_client_log": "İstemci log satırları. args: since?",
     "get_target_info": "args: vid — son alınan düşüş bilgisi {race, level, hp, exp, gold:[min,max], items:[{vnum,count,ppm}]} "
                        "ya da null (target_info ile istenir)",
-    "get_mounts": "Binek ahırı: {active, kinds:[{kind, own, level, xp, need, bonus}]} (son MR_MOUNT_LIST)",
+    "get_mounts": "Binek ahırı: {active, summoned, appearance, riding, kinds:[{kind, own, level, xp, need, bonus}]} (MR_MOUNT_LIST + MR_MOUNT_STATE)",
     "screenshot": "Ekran görüntüsü. yanıt: {format:'png', base64} veya {path}",
     "wait": "args: ms — istemci ms kadar oyun zamanı geçtikten sonra yanıt verir",
 }
@@ -58,7 +58,7 @@ ACTION_COMMANDS: dict[str, str] = {
     "drop_item": "args: slot, count?",
     "target_info": "args: vid — hedef canavarın düşüş bilgisini iste (/target_info). Headless ve sim bilgiyi "
                    "doğrudan döndürür; gerçek istemci {pending: true} döner, sonra get_target_info",
-    "mount_command": "args: op (list|ride|dismount|feed), kind? (1-5) — binek ahırı (/mr2mount); yanıt get_mounts biçiminde "
+    "mount_command": "args: op (list|summon|dismiss|ride|dismount|feed|appearance), kind? (1-5) — binek ahırı (/mr2mount); yanıt get_mounts biçiminde "
                      "ya da {pending: true}",
     "split_item": "args: slot, count — yığından count kadarını boş bir slota ayır (Shift+sürükle). yanıt: {slot}",
     "pickup": "args: vid (yerdeki item)",
